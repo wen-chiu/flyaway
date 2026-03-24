@@ -12,8 +12,6 @@ import asyncio
 import logging
 import re
 import time
-import urllib.parse
-from datetime import date as _date
 from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 import random
@@ -24,8 +22,6 @@ from config import (
     REQUEST_DELAY_SEC, MAX_RETRIES,
     PLAYWRIGHT_HEADLESS, PLAYWRIGHT_TIMEOUT,
     DEFAULT_DEPARTURE,
-    MAX_ROUNDTRIP_PAIR_CANDIDATES,
-    MAX_ROUNDTRIP_OUTPUT_PER_ROUTE,
 )
 from database import FlightRecord
 
@@ -148,96 +144,9 @@ class FlightScraper:
                     )
                 else:
                     # Playwright fallback: combine two one-way searches
-                    # NOTE:
-                    #  - We intentionally pair cheapest candidates to keep runtime bounded.
-                    #  - Output is round-trip shaped (return_* fields filled) when possible.
-                    from airline_classifier import classify_airline
-
-                    out_recs = asyncio.run(self._search_playwright(from_airport, to_airport, out_str))
-                    ret_recs = asyncio.run(self._search_playwright(to_airport, from_airport, ret_str))
-
-                    if not out_recs:
-                        records = []
-                    elif not ret_recs:
-                        # Keep outbound-only results; mark as not round-trip to avoid misleading pairing.
-                        records = out_recs
-                        for r in records:
-                            r.is_roundtrip = False
-                            r.return_date = ""
-                            r.return_duration = 0
-                            r.return_dep_time = ""
-                            r.return_arr_time = ""
-                            r.airline_type = classify_airline(r.airline)
-                    else:
-                        MAX_PAIR = MAX_ROUNDTRIP_PAIR_CANDIDATES
-                        out_top = sorted(out_recs, key=lambda r: r.price)[:MAX_PAIR]
-                        ret_top = sorted(ret_recs, key=lambda r: r.price)[:MAX_PAIR]
-
-                        def merge_airline(a1: str, a2: str) -> str:
-                            a1 = (a1 or "").strip()
-                            a2 = (a2 or "").strip()
-                            if a1 == a2 and a1:
-                                return a1
-                            if not a1:
-                                return a2
-                            if not a2:
-                                return a1
-                            return f"{a1} / {a2}"
-
-                        def merge_airline_type(t1: str, t2: str) -> str:
-                            # Keep same semantics as fast-flights paired results.
-                            if "LCC" in (t1, t2):
-                                return "LCC"
-                            if "traditional" in (t1, t2):
-                                return "traditional"
-                            return "unknown"
-
-                        def has_time(r: FlightRecord) -> bool:
-                            return bool((r.departure_time or r.arrival_time))
-
-                        full_pairs: List[FlightRecord] = []
-                        partial_pairs: List[FlightRecord] = []
-                        fetched_at = datetime.now().isoformat()
-
-                        for out in out_top:
-                            for ret in ret_top:
-                                combined_price, combined_currency = _combine_prices(
-                                    out.price, out.currency, ret.price, ret.currency
-                                )
-                                rec = FlightRecord(
-                                    departure_airport=from_airport.upper(),
-                                    arrival_airport=to_airport.upper(),
-                                    departure_date=out_str,
-                                    price=combined_price,
-                                    currency=combined_currency,
-                                    duration_minutes=out.duration_minutes,
-                                    stops=out.stops,
-                                    airline=merge_airline(out.airline, ret.airline),
-                                    flight_numbers=(out.flight_numbers or ret.flight_numbers),
-                                    departure_time=out.departure_time,
-                                    arrival_time=out.arrival_time,
-                                    fetched_at=fetched_at,
-                                    source="playwright_paired",
-                                    is_roundtrip=True,
-                                    return_date=ret_str,
-                                    return_duration=ret.duration_minutes,
-                                    return_dep_time=ret.departure_time,
-                                    return_arr_time=ret.arrival_time,
-                                    airline_type=merge_airline_type(
-                                        classify_airline(out.airline),
-                                        classify_airline(ret.airline),
-                                    ),
-                                )
-
-                                if has_time(out) and has_time(ret):
-                                    full_pairs.append(rec)
-                                elif has_time(out) or has_time(ret):
-                                    partial_pairs.append(rec)
-                                # Skip pairs where neither leg has times.
-
-                        # records = full_pairs if full_pairs else partial_pairs
-                        records = (full_pairs if full_pairs else partial_pairs)[:MAX_ROUNDTRIP_OUTPUT_PER_ROUTE]
-
+                    out = asyncio.run(self._search_playwright(from_airport, to_airport, out_str))
+                    ret = asyncio.run(self._search_playwright(to_airport, from_airport, ret_str))
+                    records = out  # return separately in playwright mode
 
                 filtered = [
                     r for r in records
@@ -466,21 +375,9 @@ class FlightScraper:
         fetched_at = datetime.now().isoformat()
         records: List[FlightRecord] = []
 
-        MAX_PAIR = MAX_ROUNDTRIP_PAIR_CANDIDATES
-        # Prefer candidates that contain outbound/return time strings.
-        # fast-flights sometimes yields flights where departure/arrival fields are empty,
-        # which later makes the reporter render "—" for that leg.
-        def has_time(r: FlightRecord) -> bool:
-            return bool((r.departure_time or r.arrival_time))
-
-        out_top = sorted(
-            out_recs,
-            key=lambda r: (0 if has_time(r) else 1, r.price),
-        )[:MAX_PAIR]
-        ret_top = sorted(
-            ret_recs,
-            key=lambda r: (0 if has_time(r) else 1, r.price),
-        )[:MAX_PAIR]
+        MAX_PAIR = 15
+        out_top = sorted(out_recs, key=lambda r: r.price)[:MAX_PAIR]
+        ret_top = sorted(ret_recs, key=lambda r: r.price)[:MAX_PAIR]
 
         if not ret_top:
             for r in out_top: r.is_roundtrip = False
@@ -499,6 +396,9 @@ class FlightScraper:
             if not a1: return a2
             if not a2: return a1
             return f"{a1} / {a2}"
+
+        def has_time(r: FlightRecord) -> bool:
+            return bool(r.departure_time or r.arrival_time)
 
         # Sort: pairs where both legs have times come first, then outbound-only, then neither
         full_pairs:    List[FlightRecord] = []
@@ -536,10 +436,14 @@ class FlightScraper:
                     partial_pairs.append(rec)
                 # Skip pairs where neither leg has times — they add no value
 
-        # Use full pairs first; fall back to partial if no full pairs exist
-        # records = full_pairs if full_pairs else partial_pairs
-        records = (full_pairs if full_pairs else partial_pairs)[:MAX_ROUNDTRIP_OUTPUT_PER_ROUTE]
-
+        # Merge both buckets: full pairs (both legs have times) shown first,
+        # partial pairs (one leg missing times) appended after.
+        # Traditional airlines often fall into partial because their return leg
+        # hits a 401 on fallback and degrades to common (empty times).
+        # Previously using `full_pairs if full_pairs else partial_pairs` meant
+        # traditional airlines were completely dropped whenever LCCs formed
+        # full pairs. Now both categories are always included.
+        records = full_pairs + partial_pairs
 
         return records
 
@@ -870,53 +774,19 @@ def _debug_flight_object(f) -> str:
 def _build_google_flights_url(
     from_airport: str,
     to_airport: str,
-    date_str: str,          # "YYYY-MM-DD"
+    date_str: str,
     adults: int = 1,
-    trip: str = "one-way",  # "one-way" | "round-trip"
-    return_date_str: str = "",
 ) -> str:
-    """
-    產生 Google Flights 直接搜尋 URL。
- 
-    修正說明：
-    原版只產生 /travel/flights?q=... 格式，Google 會把它當作關鍵字搜尋，
-    無法正確觸發航班清單。
- 
-    修正後改用 /travel/flights/search 端點，帶入正確的 tfs 參數格式，
-    並透過 f= 參數指定單程/來回，讓 Playwright 能正確抓取結果頁面。
- 
-    如果 tfs protobuf 再次失效，Playwright 後端會在 wait_for_selector 超時，
-    並由 search() 的重試邏輯捕捉，不影響主流程。
-    """
-    # 基底參數（語系 zh-TW、幣別 TWD）
-    params: dict[str, str] = {
-        "hl": "zh-TW",
-        "gl": "TW",
-        "curr": "TWD",
-    }
- 
-    # 出發 / 目的地 + 日期 → 寫入 q 參數供 Playwright 填表備用
-    from_upper = from_airport.upper()
-    to_upper = to_airport.upper()
- 
-    if trip == "round-trip" and return_date_str:
-        params["q"] = (
-            f"Flights from {from_upper} to {to_upper} "
-            f"on {date_str} returning {return_date_str}"
-        )
-        params["f"] = "1"   # f=1 → round-trip
-    else:
-        params["q"] = f"Flights from {from_upper} to {to_upper} on {date_str}"
-        params["f"] = "3"   # f=3 → one-way
- 
-    # tfs 欄位：用可讀的 JSON-like 格式，讓 Google 解析出發 / 目的地
-    # 格式範例：[[[["TPE","NRT",null,3]]],"2025-10-10",null,1,null,null,1,null,null,null,null,null,null]
-    # 注意：Google 會解碼這個格式，但不公開說明。以下是 2024~2025 觀測到的穩定格式。
-    tfs_inner = f'[[[["{from_upper}","{to_upper}",null,3]]],"{date_str}",null,{adults},null,null,1,null,null,null,null,null,null]'
-    params["tfs"] = tfs_inner
- 
-    base = "https://www.google.com/travel/flights/search"
-    return base + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    """產生 Google Flights 的直接搜尋 URL。"""
+    # tfs 參數格式：CBwQAhoeEgoyMDI1LTAxLTAxagcIARIDVFBFcgcIARIDTkpG
+    # 簡化版 URL（不帶 encoded tfs）
+    base = "https://www.google.com/travel/flights"
+    params = (
+        f"?q=Flights+from+{from_airport}+to+{to_airport}"
+        f"&hl=zh-TW"
+        f"&curr=TWD"
+    )
+    return base + params
 
 
 def build_date_range(
