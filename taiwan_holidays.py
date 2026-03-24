@@ -37,8 +37,8 @@ _HARDCODED: dict[int, dict[str, str]] = {
         "2026-06-19": "端午節 Dragon Boat Festival",
         "2026-09-25": "中秋節 Mid-Autumn Festival",
         "2026-10-10": "國慶日 National Day",
-        "2026-10-25": "光復節 ",
-        "2026-12-25": "Christmas ",
+        "2026-10-25": "光復節（台灣光復暨古寧頭紀念日）",
+        "2026-12-25": "行憲紀念日",
     },
 }
 
@@ -74,11 +74,14 @@ def _get_tw_holidays(year: int) -> Dict[date, str]:
         except Exception:
             pass
 
-    # 2. 補充 / 覆蓋硬編碼的農曆假日
+    # 2. 補充硬編碼假日（只補缺，不覆蓋 holidays 套件結果）
+    #    原因：硬編碼內容可能包含日期/名稱的差異（例如光復節、行憲紀念日等），
+    #    若覆蓋就會降低「正確性」。
     if year in _HARDCODED:
         for date_str, name in _HARDCODED[year].items():
             d = date.fromisoformat(date_str)
-            result[d] = name
+            if d not in result:
+                result[d] = name
 
     return result
 
@@ -88,10 +91,81 @@ def _is_off_day(d: date, holidays: Dict[date, str]) -> bool:
     return d.weekday() >= 5 or d in holidays
 
 
+def get_off_days(
+    start_date: date,
+    end_date: date,
+) -> Dict[date, str]:
+    """
+    取得指定區間內「不需上班」的日期 -> 原因說明。
+
+    - 週六/週日：標記為「週末」
+    - holidays 套件提供的日期（包含「補假/補休/調整」）：使用其名稱
+    """
+    if end_date < start_date:
+        return {}
+
+    years = set(range(start_date.year, end_date.year + 1))
+    all_holidays: Dict[date, str] = {}
+    for y in years:
+        all_holidays.update(_get_tw_holidays(y))
+
+    result: Dict[date, str] = {}
+    d = start_date
+    while d <= end_date:
+        if d in all_holidays:
+            result[d] = all_holidays[d]
+        elif d.weekday() >= 5:
+            result[d] = "週末"
+        d += timedelta(days=1)
+    return result
+
+
+def compute_leave_summary(
+    start_date: date,
+    end_date: date,
+) -> dict:
+    """
+    計算在「指定出遊區間」內，上班族需要請假的天數。
+
+    規則：
+    - 週六/週日：視為不需請假（free day）
+    - holidays 套件提供的補假/補休/國定假日：視為不需請假（free day）
+    - 其餘工作日：視為需要請假（leave day）
+    """
+    if end_date < start_date:
+        return {
+            "leave_days": 0,
+            "free_days": 0,
+            "total_days": 0,
+            "leave_dates": [],
+        }
+
+    off = get_off_days(start_date, end_date)
+    total_days = (end_date - start_date).days + 1
+
+    leave_dates: list[date] = []
+    d = start_date
+    while d <= end_date:
+        # weekday: 0=Mon ... 4=Fri, 5=Sat, 6=Sun
+        if d.weekday() < 5 and d not in off:
+            leave_dates.append(d)
+        d += timedelta(days=1)
+
+    leave_days = len(leave_dates)
+    free_days = total_days - leave_days
+    return {
+        "leave_days": leave_days,
+        "free_days": free_days,
+        "total_days": total_days,
+        "leave_dates": leave_dates,
+    }
+
+
 def get_holiday_windows(
     lookahead_days: int = 270,
     min_trip_days:  int = 4,
     max_trip_days:  int = 16,
+    max_leave_days: int = 10,
     from_date: Optional[date] = None,
 ) -> List[HolidayWindow]:
     """
@@ -129,7 +203,8 @@ def get_holiday_windows(
             continue
 
         # 往後延伸，加上請假日
-        for leave_budget in range(0, 10):          # 最多允許請 4 天假
+        # 針對「台灣上班族」目標：盡量用最少請假把週末與國定假日串起來。
+        for leave_budget in range(0, max_leave_days + 1):
             # 先找到現有假期塊結尾
             e = block_start
             while e <= end and _is_off_day(e, all_holidays):
@@ -158,7 +233,22 @@ def get_holiday_windows(
                 if not _is_off_day(block_start + timedelta(days=i), all_holidays)
             )
 
-            if min_trip_days <= total <= max_trip_days and actual_leave == leave_budget:
+            # 台灣上班族需求：建議窗口必須同時包含週六 + 週日
+            has_sat = any(
+                (block_start + timedelta(days=i)).weekday() == 5
+                for i in range(total)
+            )
+            has_sun = any(
+                (block_start + timedelta(days=i)).weekday() == 6
+                for i in range(total)
+            )
+
+            if (
+                min_trip_days <= total <= max_trip_days
+                and actual_leave == leave_budget
+                and has_sat
+                and has_sun
+            ):
                 included = [
                     name for d, name in all_holidays.items()
                     if block_start <= d <= block_end
