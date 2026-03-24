@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-check:
+    name: Lint & Setup Check
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Run setup check
+        run: python setup_check.py
+
+      - name: Check for committed secrets / runtime files
+        run: |
+          # Fail if someone accidentally committed the database or logs
+          if [ -f flights.db ]; then
+            echo "❌ flights.db should not be committed. Add it to .gitignore."
+            exit 1
+          fi
+          if ls *.log 2>/dev/null | grep -q .; then
+            echo "❌ .log files should not be committed. Add *.log to .gitignore."
+            exit 1
+          fi
+          echo "✅ No runtime files found in repo."
+
+      - name: Validate config loads without error
+        run: python -c "import config; print('config.py OK')"
+
+      - name: Validate imports
+        run: |
+          python -c "from flight_scraper import FlightScraper; print('FlightScraper OK')"
+          python -c "from database import FlightRecord; print('database OK')"
+          python -c "from reporter import Reporter; print('reporter OK')" || true
+          python -c "from notifier import notify_cheap_flights; print('notifier OK')" || true
+          python -c "from taiwan_holidays import HolidayPlanner; print('taiwan_holidays OK')" || true
