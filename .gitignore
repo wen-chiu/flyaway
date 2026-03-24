@@ -1,15 +1,47 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
 
-# Local artifacts
-flights.db
-reports/
-flight_tracker.log
-
-# Virtual environments
+# ── Virtual environments ───────────────────────────────────────────────────────
 .venv/
+venv/
+env/
+ENV/
 
-# Playwright cache (local)
-playwright/.cache/
+# ── Runtime / generated files (DO NOT COMMIT) ─────────────────────────────────
+flights.db
+*.db
+*.log
+reports/
 
+# ── Environment / secrets ──────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Playwright ────────────────────────────────────────────────────────────────
+playwright-report/
+test-results/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
