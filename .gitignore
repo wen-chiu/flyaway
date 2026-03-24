@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local artifacts
+flights.db
+reports/
+flight_tracker.log
+
+# Virtual environments
+.venv/
+
+# Playwright cache (local)
+playwright/.cache/
+
