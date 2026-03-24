@@ -386,6 +386,15 @@ def cmd_search(args: argparse.Namespace) -> None:
         flex_arg=getattr(args, "flex", None),
     )
 
+    # If user provided explicit outbound/return dates (not holiday-window selection),
+    # show "leave needed" (office-worker-friendly) before running searches.
+    leave_summary = None
+    if getattr(args, "outbound", None) and getattr(args, "ret", None):
+        from taiwan_holidays import compute_leave_summary
+        # outbound_dates and return_dates are aligned by ask_trip_dates (including broadcast).
+        if outbound_dates and return_dates:
+            leave_summary = compute_leave_summary(outbound_dates[0], return_dates[0])
+
     # 展開彈性日期
     out_flex = expand_flex_dates(outbound_dates, flex_days)
     ret_flex = expand_flex_dates(return_dates,   flex_days)
@@ -408,6 +417,13 @@ def cmd_search(args: argparse.Namespace) -> None:
         t.add_row("出發日期",  ", ".join(str(d) for d in out_flex))
         t.add_row("回程日期",  ", ".join(str(d) for d in ret_flex))
         t.add_row("彈性天數",  f"±{flex_days} 天")
+        if leave_summary:
+            ld = leave_summary.get("leave_dates") or []
+            ld_str = ", ".join(d.isoformat() for d in ld[:8])
+            if len(ld) > 8:
+                ld_str += " ..."
+            t.add_row("請假天數", f"{leave_summary['leave_days']} 天 / 共 {leave_summary['total_days']} 天")
+            t.add_row("請假日期", ld_str if ld_str else "—")
         t.add_row("東北亞/東南亞", "僅直達 (0 stops)")
         t.add_row("其他地區",  f"最多 {max_stops} 次轉機")
         t.add_row("最長飛行",  f"{max_duration} 小時")
@@ -418,6 +434,13 @@ def cmd_search(args: argparse.Namespace) -> None:
     else:
         print(f"\n出發機場: {from_airport} | 目的地: {len(destinations)} 個")
         print(f"出發: {out_flex} | 回程: {ret_flex} | 彈性: ±{flex_days}天")
+        if leave_summary:
+            ld = leave_summary.get("leave_dates") or []
+            ld_str = ", ".join(d.isoformat() for d in ld[:8])
+            if len(ld) > 8:
+                ld_str += " ..."
+            print(f"請假天數: {leave_summary['leave_days']} 天 / 共 {leave_summary['total_days']} 天")
+            print(f"請假日期: {ld_str if ld_str else '—'}")
 
     # ── 搜尋（來回票為主）────────────────────────────────────────────────────
     scraper = FlightScraper(max_stops=max_stops, max_duration_hours=max_duration)
