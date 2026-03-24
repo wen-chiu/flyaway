@@ -461,8 +461,20 @@ class FlightScraper:
         records: List[FlightRecord] = []
 
         MAX_PAIR = 15
-        out_top = sorted(out_recs, key=lambda r: r.price)[:MAX_PAIR]
-        ret_top = sorted(ret_recs, key=lambda r: r.price)[:MAX_PAIR]
+        # Prefer candidates that contain outbound/return time strings.
+        # fast-flights sometimes yields flights where departure/arrival fields are empty,
+        # which later makes the reporter render "—" for that leg.
+        def has_time(r: FlightRecord) -> bool:
+            return bool((r.departure_time or r.arrival_time))
+
+        out_top = sorted(
+            out_recs,
+            key=lambda r: (0 if has_time(r) else 1, r.price),
+        )[:MAX_PAIR]
+        ret_top = sorted(
+            ret_recs,
+            key=lambda r: (0 if has_time(r) else 1, r.price),
+        )[:MAX_PAIR]
 
         if not ret_top:
             for r in out_top: r.is_roundtrip = False
@@ -481,9 +493,6 @@ class FlightScraper:
             if not a1: return a2
             if not a2: return a1
             return f"{a1} / {a2}"
-
-        def has_time(r: FlightRecord) -> bool:
-            return bool(r.departure_time or r.arrival_time)
 
         # Sort: pairs where both legs have times come first, then outbound-only, then neither
         full_pairs:    List[FlightRecord] = []
