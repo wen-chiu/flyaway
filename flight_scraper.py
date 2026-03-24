@@ -144,9 +144,94 @@ class FlightScraper:
                     )
                 else:
                     # Playwright fallback: combine two one-way searches
-                    out = asyncio.run(self._search_playwright(from_airport, to_airport, out_str))
-                    ret = asyncio.run(self._search_playwright(to_airport, from_airport, ret_str))
-                    records = out  # return separately in playwright mode
+                    # NOTE:
+                    #  - We intentionally pair cheapest candidates to keep runtime bounded.
+                    #  - Output is round-trip shaped (return_* fields filled) when possible.
+                    from airline_classifier import classify_airline
+
+                    out_recs = asyncio.run(self._search_playwright(from_airport, to_airport, out_str))
+                    ret_recs = asyncio.run(self._search_playwright(to_airport, from_airport, ret_str))
+
+                    if not out_recs:
+                        records = []
+                    elif not ret_recs:
+                        # Keep outbound-only results; mark as not round-trip to avoid misleading pairing.
+                        records = out_recs
+                        for r in records:
+                            r.is_roundtrip = False
+                            r.return_date = ""
+                            r.return_duration = 0
+                            r.return_dep_time = ""
+                            r.return_arr_time = ""
+                            r.airline_type = classify_airline(r.airline)
+                    else:
+                        MAX_PAIR = 15
+                        out_top = sorted(out_recs, key=lambda r: r.price)[:MAX_PAIR]
+                        ret_top = sorted(ret_recs, key=lambda r: r.price)[:MAX_PAIR]
+
+                        def merge_airline(a1: str, a2: str) -> str:
+                            a1 = (a1 or "").strip()
+                            a2 = (a2 or "").strip()
+                            if a1 == a2 and a1:
+                                return a1
+                            if not a1:
+                                return a2
+                            if not a2:
+                                return a1
+                            return f"{a1} / {a2}"
+
+                        def merge_airline_type(t1: str, t2: str) -> str:
+                            # Keep same semantics as fast-flights paired results.
+                            if "LCC" in (t1, t2):
+                                return "LCC"
+                            if "traditional" in (t1, t2):
+                                return "traditional"
+                            return "unknown"
+
+                        def has_time(r: FlightRecord) -> bool:
+                            return bool((r.departure_time or r.arrival_time))
+
+                        full_pairs: List[FlightRecord] = []
+                        partial_pairs: List[FlightRecord] = []
+                        fetched_at = datetime.now().isoformat()
+
+                        for out in out_top:
+                            for ret in ret_top:
+                                combined_price, combined_currency = _combine_prices(
+                                    out.price, out.currency, ret.price, ret.currency
+                                )
+                                rec = FlightRecord(
+                                    departure_airport=from_airport.upper(),
+                                    arrival_airport=to_airport.upper(),
+                                    departure_date=out_str,
+                                    price=combined_price,
+                                    currency=combined_currency,
+                                    duration_minutes=out.duration_minutes,
+                                    stops=out.stops,
+                                    airline=merge_airline(out.airline, ret.airline),
+                                    flight_numbers=(out.flight_numbers or ret.flight_numbers),
+                                    departure_time=out.departure_time,
+                                    arrival_time=out.arrival_time,
+                                    fetched_at=fetched_at,
+                                    source="playwright_paired",
+                                    is_roundtrip=True,
+                                    return_date=ret_str,
+                                    return_duration=ret.duration_minutes,
+                                    return_dep_time=ret.departure_time,
+                                    return_arr_time=ret.arrival_time,
+                                    airline_type=merge_airline_type(
+                                        classify_airline(out.airline),
+                                        classify_airline(ret.airline),
+                                    ),
+                                )
+
+                                if has_time(out) and has_time(ret):
+                                    full_pairs.append(rec)
+                                elif has_time(out) or has_time(ret):
+                                    partial_pairs.append(rec)
+                                # Skip pairs where neither leg has times.
+
+                        records = full_pairs if full_pairs else partial_pairs
 
                 filtered = [
                     r for r in records
