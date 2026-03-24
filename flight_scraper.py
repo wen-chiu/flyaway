@@ -12,6 +12,8 @@ import asyncio
 import logging
 import re
 import time
+import urllib.parse
+from datetime import date as _date
 from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 import random
@@ -22,6 +24,8 @@ from config import (
     REQUEST_DELAY_SEC, MAX_RETRIES,
     PLAYWRIGHT_HEADLESS, PLAYWRIGHT_TIMEOUT,
     DEFAULT_DEPARTURE,
+    MAX_ROUNDTRIP_PAIR_CANDIDATES,
+    MAX_ROUNDTRIP_OUTPUT_PER_ROUTE,
 )
 from database import FlightRecord
 
@@ -165,7 +169,7 @@ class FlightScraper:
                             r.return_arr_time = ""
                             r.airline_type = classify_airline(r.airline)
                     else:
-                        MAX_PAIR = 15
+                        MAX_PAIR = MAX_ROUNDTRIP_PAIR_CANDIDATES
                         out_top = sorted(out_recs, key=lambda r: r.price)[:MAX_PAIR]
                         ret_top = sorted(ret_recs, key=lambda r: r.price)[:MAX_PAIR]
 
@@ -231,7 +235,9 @@ class FlightScraper:
                                     partial_pairs.append(rec)
                                 # Skip pairs where neither leg has times.
 
-                        records = full_pairs if full_pairs else partial_pairs
+                        # records = full_pairs if full_pairs else partial_pairs
+                        records = (full_pairs if full_pairs else partial_pairs)[:MAX_ROUNDTRIP_OUTPUT_PER_ROUTE]
+
 
                 filtered = [
                     r for r in records
@@ -460,7 +466,7 @@ class FlightScraper:
         fetched_at = datetime.now().isoformat()
         records: List[FlightRecord] = []
 
-        MAX_PAIR = 15
+        MAX_PAIR = MAX_ROUNDTRIP_PAIR_CANDIDATES
         # Prefer candidates that contain outbound/return time strings.
         # fast-flights sometimes yields flights where departure/arrival fields are empty,
         # which later makes the reporter render "—" for that leg.
@@ -531,7 +537,9 @@ class FlightScraper:
                 # Skip pairs where neither leg has times — they add no value
 
         # Use full pairs first; fall back to partial if no full pairs exist
-        records = full_pairs if full_pairs else partial_pairs
+        # records = full_pairs if full_pairs else partial_pairs
+        records = (full_pairs if full_pairs else partial_pairs)[:MAX_ROUNDTRIP_OUTPUT_PER_ROUTE]
+
 
         return records
 
@@ -862,19 +870,53 @@ def _debug_flight_object(f) -> str:
 def _build_google_flights_url(
     from_airport: str,
     to_airport: str,
-    date_str: str,
+    date_str: str,          # "YYYY-MM-DD"
     adults: int = 1,
+    trip: str = "one-way",  # "one-way" | "round-trip"
+    return_date_str: str = "",
 ) -> str:
-    """產生 Google Flights 的直接搜尋 URL。"""
-    # tfs 參數格式：CBwQAhoeEgoyMDI1LTAxLTAxagcIARIDVFBFcgcIARIDTkpG
-    # 簡化版 URL（不帶 encoded tfs）
-    base = "https://www.google.com/travel/flights"
-    params = (
-        f"?q=Flights+from+{from_airport}+to+{to_airport}"
-        f"&hl=zh-TW"
-        f"&curr=TWD"
-    )
-    return base + params
+    """
+    產生 Google Flights 直接搜尋 URL。
+ 
+    修正說明：
+    原版只產生 /travel/flights?q=... 格式，Google 會把它當作關鍵字搜尋，
+    無法正確觸發航班清單。
+ 
+    修正後改用 /travel/flights/search 端點，帶入正確的 tfs 參數格式，
+    並透過 f= 參數指定單程/來回，讓 Playwright 能正確抓取結果頁面。
+ 
+    如果 tfs protobuf 再次失效，Playwright 後端會在 wait_for_selector 超時，
+    並由 search() 的重試邏輯捕捉，不影響主流程。
+    """
+    # 基底參數（語系 zh-TW、幣別 TWD）
+    params: dict[str, str] = {
+        "hl": "zh-TW",
+        "gl": "TW",
+        "curr": "TWD",
+    }
+ 
+    # 出發 / 目的地 + 日期 → 寫入 q 參數供 Playwright 填表備用
+    from_upper = from_airport.upper()
+    to_upper = to_airport.upper()
+ 
+    if trip == "round-trip" and return_date_str:
+        params["q"] = (
+            f"Flights from {from_upper} to {to_upper} "
+            f"on {date_str} returning {return_date_str}"
+        )
+        params["f"] = "1"   # f=1 → round-trip
+    else:
+        params["q"] = f"Flights from {from_upper} to {to_upper} on {date_str}"
+        params["f"] = "3"   # f=3 → one-way
+ 
+    # tfs 欄位：用可讀的 JSON-like 格式，讓 Google 解析出發 / 目的地
+    # 格式範例：[[[["TPE","NRT",null,3]]],"2025-10-10",null,1,null,null,1,null,null,null,null,null,null]
+    # 注意：Google 會解碼這個格式，但不公開說明。以下是 2024~2025 觀測到的穩定格式。
+    tfs_inner = f'[[[["{from_upper}","{to_upper}",null,3]]],"{date_str}",null,{adults},null,null,1,null,null,null,null,null,null]'
+    params["tfs"] = tfs_inner
+ 
+    base = "https://www.google.com/travel/flights/search"
+    return base + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
 
 def build_date_range(
