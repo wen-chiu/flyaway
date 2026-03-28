@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 try:
     from fast_flights import (
         FlightData, Passengers, Result,
-        get_flights,
+        create_filter, get_flights,
     )
     _HAS_FAST_FLIGHTS = True
     logger.info("fast-flights 已載入 ✓")
@@ -266,6 +266,27 @@ class FlightScraper:
         effective_max = max_stops if max_stops is not None else self.max_stops
         api_max_stops = effective_max if effective_max < 2 else None
 
+        # ── 擷取 Google Flights 搜尋 URL（供訂票連結使用）──────────────────
+        # create_filter() 回傳 TFSData，其內包含 protobuf 編碼的搜尋參數。
+        # 嘗試從 TFSData 物件取出 tfs 字串以重建精確的搜尋連結。
+        google_search_url = _build_google_flights_url(from_airport, to_airport, date_str)
+        try:
+            tfs_obj = create_filter(
+                flight_data=fd,
+                trip="one-way",
+                seat="economy",
+                passengers=pax,
+                max_stops=api_max_stops,
+            )
+            tfs_str = _extract_tfs_string(tfs_obj)
+            if tfs_str:
+                google_search_url = (
+                    f"https://www.google.com/travel/flights"
+                    f"?tfs={tfs_str}&hl=zh-TW&tfu=EgQIABABIgA"
+                )
+        except Exception as e:
+            logger.debug(f"  TFS URL 擷取失敗，使用備用 URL: {e}")
+
         # Try fetch modes in order. "fallback" and "force-fallback" return full data
         # (airline name, times, duration). "common" sometimes returns empty fields.
         result = None
@@ -329,6 +350,7 @@ class FlightScraper:
                 rec = _parse_flight_obj(
                     f, from_airport, to_airport, date_str,
                     fetched_at, currency, classify_airline,
+                    google_search_url=google_search_url,
                 )
                 if rec:
                     records.append(rec)
@@ -429,6 +451,8 @@ class FlightScraper:
                     return_dep_time=ret.departure_time,
                     return_arr_time=ret.arrival_time,
                     airline_type=merge_airline_type(out.airline_type, ret.airline_type),
+                    # Use outbound's Google Flights URL; it covers the route+date
+                    google_search_url=out.google_search_url or ret.google_search_url,
                 )
                 if has_time(out) and has_time(ret):
                     full_pairs.append(rec)
@@ -601,11 +625,9 @@ def _parse_flight_obj(
     fetched_at: str,
     currency: str,
     classify_fn,
+    google_search_url: str = "",
 ) -> Optional[FlightRecord]:
-    """
-    Parse a single Flight object from the fast-flights API into a FlightRecord.
-    Returns None if price is missing or invalid.
-    """
+    """Parse a single Flight object from the fast-flights API into a FlightRecord."""
     price_raw = str(getattr(f, "price", None) or getattr(f, "min_price", None) or "")
     price, flight_currency = _parse_price_and_currency(price_raw)
     if price <= 0:
@@ -655,6 +677,7 @@ def _parse_flight_obj(
         fetched_at=fetched_at,
         source="fast_flights",
         airline_type=classify_fn(airline),
+        google_search_url=google_search_url,
     )
 
 
@@ -674,6 +697,49 @@ def _combine_prices(
     rate2 = TWD_FALLBACK_RATES.get(cur2.upper(), 1.0)
     total_twd = round(price1 * rate1 + price2 * rate2, 0)
     return total_twd, "TWD"
+
+
+def _extract_tfs_string(tfs_obj) -> str:
+    """
+    從 fast-flights 的 TFSData 物件中嘗試提取 tfs 編碼字串。
+    TFSData 是 create_filter() 的回傳值，內含 protobuf 編碼的搜尋參數。
+    Google Flights 的實際請求 URL 格式為：
+      https://www.google.com/travel/flights?tfs=<base64_protobuf>&hl=zh-TW
+
+    嘗試策略（由精確到備用）：
+      1. 直接讀取已知屬性名稱
+      2. 從 repr(tfs_obj) 提取 base64 字串
+      3. 失敗時回傳空字串
+    """
+    if tfs_obj is None:
+        return ""
+
+    # Strategy 1: Try known attribute names for the encoded TFS string
+    for attr in ("tfs_str", "tfs", "encoded", "b64", "raw_tfs", "query_string"):
+        val = getattr(tfs_obj, attr, None)
+        if val and isinstance(val, str) and len(val) > 15:
+            return val
+
+    # Strategy 2: Parse the string/repr for a base64url-looking segment
+    # The TFS string looks like: "GhoSCjIwMjYtMDUtMDFqBRIDVFBFcgU..."
+    # It appears in the primp log URLs as: ?tfs=<this_value>&hl=...
+    try:
+        s = repr(tfs_obj)
+        import re as _re
+        # Match a base64url string of meaningful length (TFS strings are ~40-100 chars)
+        matches = _re.findall(r"[A-Za-z0-9+/=_%-]{40,}", s)
+        for m in matches:
+            # Basic sanity check: should contain at least some uppercase and lowercase
+            if any(c.isupper() for c in m) and any(c.islower() for c in m):
+                # URL-decode if needed (primp may percent-encode it)
+                from urllib.parse import unquote
+                decoded = unquote(m)
+                if len(decoded) >= 30:
+                    return decoded
+    except Exception:
+        pass
+
+    return ""
 
 
 def _parse_price_and_currency(text: str) -> tuple:

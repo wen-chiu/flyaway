@@ -1,13 +1,12 @@
 """
 database.py — SQLite 資料庫操作層
-===================================
 """
 from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Generator, List, Optional
 
@@ -18,7 +17,7 @@ from config import DB_PATH
 class FlightRecord:
     departure_airport: str
     arrival_airport:   str
-    departure_date:    str        # YYYY-MM-DD
+    departure_date:    str
     price:             float
     currency:          str
     duration_minutes:  int        # 0 = unknown
@@ -28,14 +27,14 @@ class FlightRecord:
     departure_time:    str
     arrival_time:      str
     fetched_at:        str
-    source:            str = "google_flights"
-    # ── 新增欄位 ─────────────────────────────────
+    source:            str  = "google_flights"
     is_roundtrip:      bool = False
-    return_date:       str  = ""   # YYYY-MM-DD (round-trip 回程日)
-    return_duration:   int  = 0    # 回程飛行分鐘
+    return_date:       str  = ""
+    return_duration:   int  = 0
     return_dep_time:   str  = ""
     return_arr_time:   str  = ""
-    airline_type:      str  = ""   # "LCC" | "traditional" | ""
+    airline_type:      str  = ""   # "LCC" | "traditional" | "unknown"
+    google_search_url: str  = ""   # Google Flights TFS search URL for this route/date
     id:                Optional[int] = None
 
     @property
@@ -48,7 +47,7 @@ class FlightRecord:
     @property
     def stops_str(self) -> str:
         if self.stops == -1:
-            return "直達*"   # API 未提供轉機數，通常是直達
+            return "直達*"
         if self.stops == 0:
             return "直達"
         return f"{self.stops}轉"
@@ -74,7 +73,6 @@ class Database:
 
     def _init_db(self) -> None:
         with self._conn() as conn:
-            # ── Core table (original columns only) ──────────────────────────
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS flights (
                     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +80,7 @@ class Database:
                     arrival_airport   TEXT    NOT NULL,
                     departure_date    TEXT    NOT NULL,
                     price             REAL    NOT NULL,
-                    currency          TEXT    NOT NULL DEFAULT 'USD',
+                    currency          TEXT    NOT NULL DEFAULT '',
                     duration_minutes  INTEGER NOT NULL DEFAULT 0,
                     stops             INTEGER NOT NULL DEFAULT 0,
                     airline           TEXT,
@@ -105,24 +103,23 @@ class Database:
                     error_msg     TEXT
                 );
             """)
-
-            # ── Migrate: add new columns if they don't exist yet ────────────
-            new_columns = [
-                ("is_roundtrip",    "INTEGER NOT NULL DEFAULT 0"),
-                ("return_date",     "TEXT    NOT NULL DEFAULT ''"),
-                ("return_duration", "INTEGER NOT NULL DEFAULT 0"),
-                ("return_dep_time", "TEXT    NOT NULL DEFAULT ''"),
-                ("return_arr_time", "TEXT    NOT NULL DEFAULT ''"),
-                ("airline_type",    "TEXT    NOT NULL DEFAULT ''"),
+            # Add new columns gracefully (migration-safe)
+            new_cols = [
+                ("is_roundtrip",      "INTEGER NOT NULL DEFAULT 0"),
+                ("return_date",       "TEXT    NOT NULL DEFAULT ''"),
+                ("return_duration",   "INTEGER NOT NULL DEFAULT 0"),
+                ("return_dep_time",   "TEXT    NOT NULL DEFAULT ''"),
+                ("return_arr_time",   "TEXT    NOT NULL DEFAULT ''"),
+                ("airline_type",      "TEXT    NOT NULL DEFAULT ''"),
+                ("google_search_url", "TEXT    NOT NULL DEFAULT ''"),
             ]
-            for col, defn in new_columns:
+            for col, defn in new_cols:
                 try:
                     conn.execute(f"ALTER TABLE flights ADD COLUMN {col} {defn}")
                     conn.commit()
                 except Exception:
-                    pass   # column already exists
-
-            # ── Indexes that depend on migrated columns ──────────────────────
+                    pass  # column already exists
+            # Indexes for migrated columns
             for idx_sql in [
                 "CREATE INDEX IF NOT EXISTS idx_flights_type ON flights(airline_type)",
                 "CREATE INDEX IF NOT EXISTS idx_flights_rt   ON flights(is_roundtrip)",
@@ -142,14 +139,16 @@ class Database:
                     price, currency, duration_minutes, stops, airline,
                     flight_numbers, departure_time, arrival_time,
                     fetched_at, source, is_roundtrip, return_date,
-                    return_duration, return_dep_time, return_arr_time, airline_type)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    return_duration, return_dep_time, return_arr_time,
+                    airline_type, google_search_url)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(r.departure_airport, r.arrival_airport, r.departure_date,
                   r.price, r.currency, r.duration_minutes, r.stops,
                   r.airline, r.flight_numbers, r.departure_time,
                   r.arrival_time, r.fetched_at, r.source,
                   int(r.is_roundtrip), r.return_date, r.return_duration,
-                  r.return_dep_time, r.return_arr_time, r.airline_type)
+                  r.return_dep_time, r.return_arr_time, r.airline_type,
+                  r.google_search_url)
                  for r in records]
             )
         return len(records)
@@ -198,11 +197,10 @@ class Database:
         if fetched_today:
             today_filter = "AND date(fetched_at) = ?"
             params.append(datetime.now().strftime("%Y-%m-%d"))
+        date_filter = ""
         if departure_date:
             date_filter = "AND departure_date = ?"
             params.append(departure_date)
-        else:
-            date_filter = ""
         with self._conn() as conn:
             rows = conn.execute(
                 f"""SELECT f.* FROM flights f
