@@ -386,15 +386,6 @@ def cmd_search(args: argparse.Namespace) -> None:
         flex_arg=getattr(args, "flex", None),
     )
 
-    # If user provided explicit outbound/return dates (not holiday-window selection),
-    # show "leave needed" (office-worker-friendly) before running searches.
-    leave_summary = None
-    if getattr(args, "outbound", None) and getattr(args, "ret", None):
-        from taiwan_holidays import compute_leave_summary
-        # outbound_dates and return_dates are aligned by ask_trip_dates (including broadcast).
-        if outbound_dates and return_dates:
-            leave_summary = compute_leave_summary(outbound_dates[0], return_dates[0])
-
     # 展開彈性日期
     out_flex = expand_flex_dates(outbound_dates, flex_days)
     ret_flex = expand_flex_dates(return_dates,   flex_days)
@@ -417,13 +408,6 @@ def cmd_search(args: argparse.Namespace) -> None:
         t.add_row("出發日期",  ", ".join(str(d) for d in out_flex))
         t.add_row("回程日期",  ", ".join(str(d) for d in ret_flex))
         t.add_row("彈性天數",  f"±{flex_days} 天")
-        if leave_summary:
-            ld = leave_summary.get("leave_dates") or []
-            ld_str = ", ".join(d.isoformat() for d in ld[:8])
-            if len(ld) > 8:
-                ld_str += " ..."
-            t.add_row("請假天數", f"{leave_summary['leave_days']} 天 / 共 {leave_summary['total_days']} 天")
-            t.add_row("請假日期", ld_str if ld_str else "—")
         t.add_row("東北亞/東南亞", "僅直達 (0 stops)")
         t.add_row("其他地區",  f"最多 {max_stops} 次轉機")
         t.add_row("最長飛行",  f"{max_duration} 小時")
@@ -434,13 +418,6 @@ def cmd_search(args: argparse.Namespace) -> None:
     else:
         print(f"\n出發機場: {from_airport} | 目的地: {len(destinations)} 個")
         print(f"出發: {out_flex} | 回程: {ret_flex} | 彈性: ±{flex_days}天")
-        if leave_summary:
-            ld = leave_summary.get("leave_dates") or []
-            ld_str = ", ".join(d.isoformat() for d in ld[:8])
-            if len(ld) > 8:
-                ld_str += " ..."
-            print(f"請假天數: {leave_summary['leave_days']} 天 / 共 {leave_summary['total_days']} 天")
-            print(f"請假日期: {ld_str if ld_str else '—'}")
 
     # ── 搜尋（來回票為主）────────────────────────────────────────────────────
     scraper = FlightScraper(max_stops=max_stops, max_duration_hours=max_duration)
@@ -584,6 +561,205 @@ def cmd_history(args: argparse.Namespace) -> None:
                     r.price    = to_twd(r.price, r.currency)
                     r.currency = "TWD"
         print_results(records, title=f"📊 資料庫中 {frm} 出發各地最低票價")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  子命令：vacation
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cmd_vacation(args: argparse.Namespace) -> None:
+    """
+    Vacation Mode — 自動在未來 6 個月或 1 年內找最便宜的旅遊組合。
+    short: 5-6 天 / 1 週末 / 亞洲直達
+    long:  8-11 或 15-18 天 / 2-3 週末 / 亞洲以外含轉機
+    """
+    from config import (
+        DEFAULT_DEPARTURE,
+        ASIA_DESTINATIONS, NON_ASIA_DESTINATIONS,
+        VACATION_HORIZON_6M, VACATION_HORIZON_1Y,
+        VACATION_SHORT_DAYS_MIN, VACATION_SHORT_DAYS_MAX,
+        VACATION_SHORT_MAX_STOPS, VACATION_SHORT_MAX_DURATION_H,
+        VACATION_LONG_2W_DAYS_MIN, VACATION_LONG_2W_DAYS_MAX,
+        VACATION_LONG_3W_DAYS_MIN, VACATION_LONG_3W_DAYS_MAX,
+        VACATION_LONG_MAX_STOPS, VACATION_LONG_MAX_DURATION_H,
+        VACATION_REQUIRE_TW_HOLIDAY,
+        VACATION_TOP_WINDOWS, VACATION_TOP_DEST, VACATION_TOP_RESULTS,
+    )
+    from vacation_windows import find_vacation_windows, print_vacation_windows
+    from flight_scraper import FlightScraper
+    from database import Database
+    from reporter import print_results, export_csv
+    from currency import to_twd
+
+    # ── 互動式設定 ────────────────────────────────────────────────────────────
+    mode = getattr(args, "mode", None)
+    if not mode:
+        if _HAS_RICH:
+            _print("\n[bold]選擇假期模式：[/bold]")
+            _print("  [cyan] 1[/cyan]. 🏖️  短途假期 (short) — 5-6 天 / 亞洲直達")
+            _print("  [cyan] 2[/cyan]. ✈️  長途假期 (long)  — 8-18 天 / 跨洲含轉機")
+            choice = _int_ask("輸入編號", 1)
+            mode = "short" if choice == 1 else "long"
+        else:
+            print("  1. short  2. long  選擇: ", end="")
+            mode = "short" if input().strip() != "2" else "long"
+
+    horizon_arg = getattr(args, "horizon", None)
+    if not horizon_arg:
+        if _HAS_RICH:
+            _print("\n[bold]搜尋範圍：[/bold]")
+            _print("  [cyan] 1[/cyan]. 未來 6 個月")
+            _print("  [cyan] 2[/cyan]. 未來 1 年")
+            h_choice = _int_ask("輸入編號", 1)
+            horizon = VACATION_HORIZON_6M if h_choice == 1 else VACATION_HORIZON_1Y
+        else:
+            print("  1=6個月  2=1年  選擇: ", end="")
+            horizon = VACATION_HORIZON_6M if input().strip() != "2" else VACATION_HORIZON_1Y
+    else:
+        horizon = int(horizon_arg)
+
+    require_holiday = getattr(args, "require_holiday", None)
+    if require_holiday is None:
+        require_holiday = _confirm("必須包含台灣國定假日？", default=VACATION_REQUIRE_TW_HOLIDAY)
+
+    show_twd = getattr(args, "twd", False)
+    if not show_twd and not getattr(args, "mode", None):
+        show_twd = _confirm("以台幣 (TWD) 顯示票價？", default=True)
+
+    from_airport = (getattr(args, "from_airport", None) or DEFAULT_DEPARTURE).upper()
+
+    # ── 設定依模式調整 ────────────────────────────────────────────────────────
+    if mode == "short":
+        destinations   = ASIA_DESTINATIONS
+        max_stops      = VACATION_SHORT_MAX_STOPS
+        max_duration_h = VACATION_SHORT_MAX_DURATION_H
+        dest_label_str = "亞洲（直達）"
+        short_range    = (
+            getattr(args, "days_min", None) or VACATION_SHORT_DAYS_MIN,
+            getattr(args, "days_max", None) or VACATION_SHORT_DAYS_MAX,
+        )
+        long_2w_range  = (VACATION_LONG_2W_DAYS_MIN, VACATION_LONG_2W_DAYS_MAX)
+        long_3w_range  = (VACATION_LONG_3W_DAYS_MIN, VACATION_LONG_3W_DAYS_MAX)
+    else:
+        destinations   = NON_ASIA_DESTINATIONS
+        max_stops      = getattr(args, "max_stops", None) or VACATION_LONG_MAX_STOPS
+        max_duration_h = getattr(args, "max_duration", None) or VACATION_LONG_MAX_DURATION_H
+        dest_label_str = "亞洲以外（含轉機）"
+        short_range    = (VACATION_SHORT_DAYS_MIN, VACATION_SHORT_DAYS_MAX)
+        long_2w_range  = (
+            getattr(args, "days_min", None) or VACATION_LONG_2W_DAYS_MIN,
+            getattr(args, "days_max", None) or VACATION_LONG_2W_DAYS_MAX,
+        )
+        long_3w_range  = (VACATION_LONG_3W_DAYS_MIN, VACATION_LONG_3W_DAYS_MAX)
+
+    # Allow custom destination override
+    dest_arg = getattr(args, "dest", None)
+    if dest_arg:
+        from config import WORLD_DESTINATIONS, ALL_DESTINATIONS
+        if dest_arg.upper() == "ALL":
+            destinations = ALL_DESTINATIONS
+        elif dest_arg in WORLD_DESTINATIONS:
+            destinations = WORLD_DESTINATIONS[dest_arg]
+        else:
+            destinations = [c.strip().upper() for c in dest_arg.split(",")]
+        dest_label_str = dest_arg
+
+    top_windows = getattr(args, "top_windows", None) or VACATION_TOP_WINDOWS
+    top_dest    = getattr(args, "top_dest",    None) or VACATION_TOP_DEST
+
+    # ── 找旅遊窗口 ────────────────────────────────────────────────────────────
+    _print(f"\n[bold cyan]🔍 計算旅遊窗口...[/bold cyan]" if _HAS_RICH
+           else "\n計算旅遊窗口...")
+
+    windows = find_vacation_windows(
+        mode=mode,
+        horizon_days=horizon,
+        require_tw_holiday=require_holiday,
+        short_days_range=short_range,
+        long_days_range_2w=long_2w_range,
+        long_days_range_3w=long_3w_range,
+    )
+
+    if not windows:
+        _print("⚠️  在指定範圍內找不到符合條件的旅遊窗口。\n"
+               "  嘗試調整 --require-holiday=false 或增加 --horizon。")
+        return
+
+    print_vacation_windows(windows, mode=mode, top_n=top_windows * 2)
+
+    chosen_windows = windows[:top_windows]
+    dest_sample    = destinations[:top_dest]
+
+    if _HAS_RICH:
+        from rich.table import Table as RTable
+        from rich import box as rbox
+        t = RTable(title="搜尋設定", box=rbox.SIMPLE)
+        t.add_column("項目", style="dim")
+        t.add_column("設定", style="cyan")
+        t.add_row("假期模式",     "🏖️ 短途" if mode == "short" else "✈️ 長途")
+        t.add_row("目的地",       f"{dest_label_str}  ({len(dest_sample)} 個)")
+        t.add_row("最多轉機",     "直達" if max_stops == 0 else f"≤{max_stops} 次")
+        t.add_row("最長飛行",     f"{max_duration_h} 小時")
+        t.add_row("搜尋窗口數",   str(len(chosen_windows)))
+        t.add_row("含台灣假日",   "✅ 必含" if require_holiday else "❌ 不限")
+        t.add_row("顯示幣別",     "TWD 台幣" if show_twd else "原始幣別")
+        console.print(t)
+        if not _confirm("確認開始搜尋？", default=True):
+            return
+
+    # ── 搜尋每個窗口 ──────────────────────────────────────────────────────────
+    scraper = FlightScraper(max_stops=max_stops, max_duration_hours=max_duration_h)
+    db      = Database()
+
+    all_results: List = []
+
+    for w_idx, win in enumerate(chosen_windows, 1):
+        _print(
+            f"\n[bold]窗口 {w_idx}/{len(chosen_windows)}:[/bold]  "
+            f"[cyan]{win.depart}[/cyan] → [cyan]{win.ret}[/cyan]  "
+            f"({win.trip_days}天 / {win.weekends}週末)"
+            if _HAS_RICH else
+            f"\n窗口 {w_idx}/{len(chosen_windows)}: {win.depart} → {win.ret}"
+        )
+
+        records = scraper.search_roundtrip_many(
+            from_airport=from_airport,
+            destinations=dest_sample,
+            outbound_dates=[win.depart],
+            return_dates=[win.ret],
+        )
+
+        if show_twd:
+            for r in records:
+                if r.currency != "TWD":
+                    r.price    = to_twd(r.price, r.currency)
+                    r.currency = "TWD"
+
+        if records:
+            db.bulk_insert_flights(records)
+            all_results.extend(records)
+            # Show top results per window
+            print_results(
+                records,
+                title=f"{'🏖️' if mode=='short' else '✈️'}  {win.depart}→{win.ret} 最便宜去處",
+                top_n=VACATION_TOP_RESULTS,
+            )
+
+    # ── 跨所有窗口的總排行 ────────────────────────────────────────────────────
+    if all_results:
+        _print(
+            "\n[bold magenta]══════════════════════════════════[/bold magenta]\n"
+            f"[bold magenta]  🏆 全期間最便宜 {VACATION_TOP_RESULTS} 筆總排行[/bold magenta]\n"
+            "[bold magenta]══════════════════════════════════[/bold magenta]"
+            if _HAS_RICH else
+            "\n=== 全期間最便宜總排行 ==="
+        )
+        print_results(all_results, title="全期間最低票價排行", top_n=VACATION_TOP_RESULTS)
+
+        if getattr(args, "export_csv", False) or _ask_export_csv():
+            export_csv(all_results, filename=f"vacation_{mode}_{date.today()}.csv")
+    else:
+        _print("⚠️  所有窗口均未找到符合條件的航班。")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -755,6 +931,39 @@ def build_parser() -> argparse.ArgumentParser:
     p_h.add_argument("--intercontinental", action="store_true",
                      help="顯示適合跨洲旅行（9–16天）的窗口")
 
+    # ── vacation ──────────────────────────────────────────────────────────────
+    p_v = sub.add_parser("vacation", help="🏖️ Vacation Mode — 自動找最便宜旅遊組合")
+    p_v.add_argument("--mode", choices=["short", "long"],
+                     help="short=短途5-6天/亞洲直達  long=長途8-18天/跨洲")
+    p_v.add_argument("--horizon", type=int, metavar="DAYS",
+                     help=f"搜尋未來幾天 (預設短途={180}/長途={365})")
+    p_v.add_argument("--require-holiday", dest="require_holiday",
+                     action="store_true", default=None,
+                     help="必須包含台灣國定假日")
+    p_v.add_argument("--no-holiday", dest="require_holiday",
+                     action="store_false",
+                     help="不要求包含台灣假日（一般週末亦可）")
+    p_v.add_argument("--days-min", type=int, dest="days_min",
+                     help="覆蓋假期最少天數")
+    p_v.add_argument("--days-max", type=int, dest="days_max",
+                     help="覆蓋假期最多天數")
+    p_v.add_argument("--dest", metavar="CODE|REGION",
+                     help="覆蓋預設目的地（預設 short=亞洲, long=跨洲）")
+    p_v.add_argument("--from", dest="from_airport", default="TPE",
+                     help="出發機場（預設 TPE）")
+    p_v.add_argument("--max-stops", type=int, dest="max_stops",
+                     help="long 模式最多轉機次數（預設 2）")
+    p_v.add_argument("--max-duration", type=int, dest="max_duration",
+                     help="long 模式最長飛行時數（預設 26）")
+    p_v.add_argument("--top-windows", type=int, dest="top_windows",
+                     help="最多搜尋幾個時間窗口（預設 8）")
+    p_v.add_argument("--top-dest", type=int, dest="top_dest",
+                     help="每個窗口搜尋幾個目的地（預設 30）")
+    p_v.add_argument("--twd", action="store_true",
+                     help="以台幣顯示")
+    p_v.add_argument("--export-csv", action="store_true",
+                     help="自動匯出 CSV")
+
     # ── history ───────────────────────────────────────────────────────────────
     p_hi = sub.add_parser("history", help="查看歷史票價紀錄")
     p_hi.add_argument("--from", dest="from_airport", default="TPE")
@@ -800,6 +1009,7 @@ def main() -> None:
         "search":    cmd_search,
         "schedule":  cmd_schedule,
         "holidays":  cmd_holidays,
+        "vacation":  cmd_vacation,
         "history":   cmd_history,
         "debug-api": cmd_debug_api,
     }
