@@ -164,8 +164,17 @@ def print_results(
 def _render_table(records: List[FlightRecord], title: str, header_style: str = "bold cyan") -> None:
     if not records:
         return
-    is_rt = any(r.is_roundtrip for r in records)
+    is_rt        = any(r.is_roundtrip for r in records)
     has_ret_time = is_rt and any(r.return_dep_time or r.return_arr_time for r in records)
+
+    # Pre-build booking links for all records
+    try:
+        from booking_links import BookingLinkFactory, format_links_rich, format_links_plain
+        link_sets = [BookingLinkFactory.from_record(r) for r in records]
+        _HAS_LINKS = True
+    except Exception:
+        link_sets = [None] * len(records)
+        _HAS_LINKS = False
 
     if _HAS_RICH:
         t = Table(title=title, box=box.ROUNDED, show_lines=True, highlight=True)
@@ -182,8 +191,10 @@ def _render_table(records: List[FlightRecord], title: str, header_style: str = "
         t.add_column("航空公司",  style="dim",      min_width=14)
         t.add_column("來回總價" if is_rt else "票價",
                      justify="right", style="bold green", min_width=12)
+        if _HAS_LINKS:
+            t.add_column("訂票連結", style="blue", min_width=18)
 
-        for i, r in enumerate(records, 1):
+        for i, (r, ls) in enumerate(zip(records, link_sets), 1):
             out_time = _fmt_time(r.departure_time, r.arrival_time)
             row = [
                 str(i),
@@ -204,6 +215,8 @@ def _render_table(records: List[FlightRecord], title: str, header_style: str = "
                 r.airline or "—",
                 format_price(r.price, r.currency),
             ]
+            if _HAS_LINKS:
+                row.append(format_links_rich(ls) if ls else "—")
             t.add_row(*row)
 
         console.print(t)
@@ -213,14 +226,19 @@ def _render_table(records: List[FlightRecord], title: str, header_style: str = "
         print(f"\n{'='*90}")
         print(f"  {title}")
         print(f"{'='*90}")
-        for i, r in enumerate(records, 1):
+        for i, (r, ls) in enumerate(zip(records, link_sets), 1):
             ret_info = f" ↩{r.return_date}" if is_rt and r.return_date else ""
-            ret_t    = f" ({_fmt_time(r.return_dep_time, r.return_arr_time)})" if has_ret_time and (r.return_dep_time or r.return_arr_time) else ""
+            ret_t    = f" ({_fmt_time(r.return_dep_time, r.return_arr_time)})" \
+                       if has_ret_time and (r.return_dep_time or r.return_arr_time) else ""
             print(
                 f"{i:>3}  {dest_label(r.arrival_airport):<16} "
-                f"去:{r.departure_date} {_fmt_time(r.departure_time, r.arrival_time)}{ret_info}{ret_t}"
+                f"去:{r.departure_date} {_fmt_time(r.departure_time, r.arrival_time)}"
+                f"{ret_info}{ret_t}"
                 f"  {r.stops_str:>5}  {r.airline:<16}  {format_price(r.price, r.currency):>12}"
             )
+            if _HAS_LINKS and ls:
+                for line in format_links_plain(ls):
+                    print(f"       {line}")
         print(f"{'='*90}\n")
 
 
