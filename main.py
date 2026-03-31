@@ -304,25 +304,101 @@ def cmd_search(args: argparse.Namespace) -> None:
         ).upper()
 
     # ── 目的地 ────────────────────────────────────────────────────────────────
+    # Country / city name aliases → maps casual names to IATA lists
+    _DEST_ALIASES: dict[str, list[str]] = {
+        # 國家名稱（英文）
+        "japan":       ["NRT", "HND", "KIX", "NGO", "CTS", "FUK"],
+        "korea":       ["ICN", "GMP", "PUS"],
+        "thailand":    ["BKK", "DMK"],
+        "singapore":   ["SIN"],
+        "malaysia":    ["KUL"],
+        "indonesia":   ["CGK", "DPS"],
+        "philippines": ["MNL"],
+        "vietnam":     ["HAN", "SGN"],
+        "hongkong":    ["HKG"],
+        "uk":          ["LHR"],
+        "france":      ["CDG"],
+        "germany":     ["FRA"],
+        "usa":         ["JFK", "LAX", "SFO", "ORD", "SEA", "DFW", "MIA", "BOS"],
+        "usa":         ["JFK", "LAX", "SFO", "ORD", "SEA"],
+        "canada":      ["YVR", "YYZ"],
+        "australia":   ["SYD", "MEL", "BNE", "PER"],
+        # 城市名稱（英文）
+        "tokyo":       ["NRT", "HND"],
+        "osaka":       ["KIX"],
+        "nagoya":      ["NGO"],
+        "sapporo":     ["CTS"],
+        "fukuoka":     ["FUK"],
+        "seoul":       ["ICN", "GMP"],
+        "busan":       ["PUS"],
+        "bangkok":     ["BKK", "DMK"],
+        "kualalumpur": ["KUL"],
+        "bali":        ["DPS"],
+        "jakarta":     ["CGK"],
+        "hanoi":       ["HAN"],
+        "hochiminh":   ["SGN"],
+        "dubai":       ["DXB"],
+        "london":      ["LHR"],
+        "paris":       ["CDG"],
+        "frankfurt":   ["FRA"],
+        "amsterdam":   ["AMS"],
+        "newyork":     ["JFK"],
+        "losangeles":  ["LAX"],
+        "sydney":      ["SYD"],
+        "melbourne":   ["MEL"],
+        # 中文城市名
+        "東京":        ["NRT", "HND"],
+        "大阪":        ["KIX"],
+        "首爾":        ["ICN", "GMP"],
+        "曼谷":        ["BKK", "DMK"],
+        "新加坡":      ["SIN"],
+        "香港":        ["HKG"],
+        "吉隆坡":      ["KUL"],
+        "峇里島":      ["DPS"],
+        "日本":        ["NRT", "HND", "KIX", "NGO", "CTS", "FUK"],
+        "韓國":        ["ICN", "GMP", "PUS"],
+        "泰國":        ["BKK", "DMK"],
+        "歐洲":        WORLD_DESTINATIONS.get("歐洲 Europe", []),
+        "北美":        WORLD_DESTINATIONS.get("北美 N America", []),
+    }
+
     destinations: List[str] = []
     dest_arg = getattr(args, "dest", None)
     if dest_arg:
         dest_up = dest_arg.upper()
+        dest_low = dest_arg.lower().replace(" ", "").replace("-", "")
         if dest_up == "ALL":
             destinations = ALL_DESTINATIONS
         elif dest_up == "MY" or dest_up == "MINE":
             from config import MY_DESTINATIONS
             destinations = MY_DESTINATIONS
         elif dest_arg in WORLD_DESTINATIONS:
+            # Exact region name match e.g. "東北亞 NE Asia"
             destinations = WORLD_DESTINATIONS[dest_arg]
+        elif dest_low in _DEST_ALIASES:
+            # Country/city alias e.g. "japan", "Tokyo"
+            destinations = _DEST_ALIASES[dest_low]
+        elif dest_arg in _DEST_ALIASES:
+            destinations = _DEST_ALIASES[dest_arg]
         else:
-            # try FAVOURITE_GROUPS key match
-            from config import FAVOURITE_GROUPS
-            matched = next((v for k, v in FAVOURITE_GROUPS.items() if dest_arg in k), None)
-            if matched:
-                destinations = matched
+            # Try partial region name match
+            matched_region = next(
+                (codes for region, codes in WORLD_DESTINATIONS.items()
+                 if dest_arg.lower() in region.lower()),
+                None
+            )
+            if matched_region:
+                destinations = matched_region
             else:
-                destinations = [c.strip().upper() for c in dest_arg.split(",")]
+                from config import FAVOURITE_GROUPS
+                matched_fav = next(
+                    (v for k, v in FAVOURITE_GROUPS.items() if dest_arg in k), None
+                )
+                if matched_fav:
+                    destinations = matched_fav
+                else:
+                    # Treat as IATA codes (comma-separated)
+                    destinations = [c.strip().upper() for c in dest_arg.split(",") if c.strip()]
     else:
         from config import MY_DESTINATIONS, FAVOURITE_GROUPS
         # Build unified menu: favourites first, then regions, then ALL
@@ -553,7 +629,7 @@ def cmd_vacation(args: argparse.Namespace) -> None:
     from vacation_windows import find_vacation_windows, print_vacation_windows
     from flight_scraper import FlightScraper
     from database import Database
-    from reporter import print_results, export_csv
+    from reporter import print_results, print_vacation_summary, export_csv
 
     # ── 選擇假期模式 ──────────────────────────────────────────────────────────
     mode = getattr(args, "mode", None)
@@ -619,7 +695,17 @@ def cmd_vacation(args: argparse.Namespace) -> None:
             destinations   = NON_ASIA_DESTINATIONS
             dest_label_str = "亞洲以外"
 
-    max_stops      = getattr(args, "max_stops", None)    or cfg["max_stops"]
+    # BUG FIX: short mode MUST be direct-flight only, regardless of args.
+    # The original design: short trip (Asia) = nonstop only.
+    # get_max_stops_for() already enforces 0 for NE/SE Asia airports,
+    # but for other Asia regions (S Asia, Middle East) we need mode-level override.
+    # We pass max_stops from config, NOT from args, for short mode.
+    if mode == "short":
+        # Short mode: always direct flight, config is authoritative
+        max_stops = cfg["max_stops"]  # = 0
+    else:
+        max_stops = getattr(args, "max_stops", None) or cfg["max_stops"]
+
     max_duration_h = getattr(args, "max_duration", None) or cfg["max_duration"]
     top_windows    = getattr(args, "top_windows", None)  or VACATION_TOP_WINDOWS
     top_dest       = getattr(args, "top_dest",    None)  or VACATION_TOP_DEST
@@ -656,7 +742,7 @@ def cmd_vacation(args: argparse.Namespace) -> None:
         t.add_row("假期模式",  cfg["label"])
         t.add_row("固定天數",  f"{cfg['days']} 天" + (f"  ±{flex_days} 天彈性" if flex_days else ""))
         t.add_row("目的地",    f"{dest_label_str}（{len(dest_sample)} 個航點）")
-        t.add_row("最多轉機",  "直達" if max_stops == 0 else f"≤{max_stops} 次")
+        t.add_row("最多轉機",  "直達（強制）" if max_stops == 0 else f"≤{max_stops} 次")
         t.add_row("最長飛行",  f"{max_duration_h} 小時")
         t.add_row("搜尋窗口",  f"{len(chosen_windows)} 個")
         t.add_row("含台灣假日", "✅ 必含" if require_holiday else "不限")
@@ -665,9 +751,11 @@ def cmd_vacation(args: argparse.Namespace) -> None:
             return
 
     # ── 逐窗口搜尋 ────────────────────────────────────────────────────────────
+    # BUG FIX: short mode passes max_stops=0 to FlightScraper,
+    # which is then passed down to each search_roundtrip call.
     scraper     = FlightScraper(max_stops=max_stops, max_duration_hours=max_duration_h)
     db          = Database()
-    all_results = []
+    all_results: List = []
 
     for w_idx, win in enumerate(chosen_windows, 1):
         _print(
@@ -689,19 +777,25 @@ def cmd_vacation(args: argparse.Namespace) -> None:
         if records:
             db.bulk_insert_flights(records)
             all_results.extend(records)
+            # Per-window results: grouped by date, split traditional/LCC
             print_results(
                 records,
-                title=f"{cfg['label']}  {win.depart}→{win.ret}  最便宜去處",
+                title=f"{cfg['label']}  {win.depart}→{win.ret}",
                 top_n=VACATION_TOP_RESULTS,
+                split_lcc=True,
+                group_by_date=False,  # per-window already has one date pair
             )
 
-    # ── 跨窗口全期間排行 ──────────────────────────────────────────────────────
+    # ── 全期間總排行（核心輸出）──────────────────────────────────────────────
     if all_results:
-        _print(
-            f"\n[bold magenta]🏆 全期間最低票價 TOP {VACATION_TOP_RESULTS}[/bold magenta]"
-            if _HAS_RICH else f"\n=== 全期間最低票價 TOP {VACATION_TOP_RESULTS} ==="
+        # BUG FIX: use print_vacation_summary (the dedicated function)
+        # which shows a clean, sorted summary table grouped by airline type,
+        # with booking links, covering all dates and destinations.
+        print_vacation_summary(
+            all_results,
+            mode_label=cfg["label"],
+            top_n=VACATION_TOP_RESULTS,
         )
-        print_results(all_results, title=f"{cfg['label']} 全期間最低票價", top_n=VACATION_TOP_RESULTS)
 
         if getattr(args, "export_csv", False) or _ask_export_csv():
             export_csv(all_results, filename=f"vacation_{mode}_{date.today()}.csv")

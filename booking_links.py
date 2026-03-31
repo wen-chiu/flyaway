@@ -115,15 +115,26 @@ def _build_google_flights_link(
     否則構建基本搜尋 URL。
     """
     if tfs_url and "tfs=" in tfs_url:
-        # 精確 TFS URL：直接對應到該航線的搜尋結果
+        # 精確 TFS URL：直接對應到該航線的搜尋結果頁
         url   = tfs_url
         label = "Google Flights 搜尋結果"
     else:
-        # Fallback：一般搜尋 URL（含出發地、目的地）
-        q = f"Flights from {from_airport} to {to_airport}"
-        params: dict = {"q": q, "hl": "zh-TW"}
-        url   = f"https://www.google.com/travel/flights?{urlencode(params)}"
-        label = "Google Flights 搜尋"
+        # Fallback: 使用 Google Flights 的深度連結格式
+        # 此 URL 會直接帶入出發地、目的地和日期，讓使用者看到搜尋結果
+        if return_date:
+            url = (
+                f"https://www.google.com/travel/flights/search?"
+                f"q=flights+from+{from_airport}+to+{to_airport}"
+                f"+{depart_date}+return+{return_date}"
+                f"&hl=zh-TW"
+            )
+        else:
+            url = (
+                f"https://www.google.com/travel/flights/search?"
+                f"q=flights+from+{from_airport}+to+{to_airport}+{depart_date}"
+                f"&hl=zh-TW"
+            )
+        label = f"Google Flights {from_airport}→{to_airport}"
 
     return BookingLink(
         label=label,
@@ -599,22 +610,28 @@ class BookingLinkFactory:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def format_links_rich(link_set: BookingLinkSet) -> str:
-    """回傳 Rich markup 格式字串，供 Rich Table 顯示（可點擊連結）。"""
+    """
+    回傳 Rich 格式字串供表格顯示。
+    
+    不使用 [link=URL] markup（URL 內的 %, &, = 等字元會導致 Rich MarkupError）。
+    改為顯示標籤名稱，完整 URL 在 CSV 匯出中保留。
+    """
     if not link_set.has_links():
         return "[dim]—[/dim]"
     lines = []
     for link in link_set.all_links:
         if link.is_google_flights:
-            lines.append(f"[bold cyan]🔍[/bold cyan] [link={link.url}]{link.label}[/link]")
+            # Show icon + label only; URL too long for table cell
+            lines.append(f"[bold cyan]🔍 {link.label}[/bold cyan]")
         elif link.is_direct:
-            lines.append(f"[green]✈[/green]  [link={link.url}]{link.label}[/link]")
+            lines.append(f"[green]✈  {link.label}[/green]")
         else:
-            lines.append(f"[dim]🔗[/dim] [link={link.url}]{link.label}[/link]")
+            lines.append(f"[dim]🔗 {link.label}[/dim]")
     return "\n".join(lines)
 
 
 def format_links_plain(link_set: BookingLinkSet) -> list[str]:
-    """回傳純文字連結清單。"""
+    """回傳純文字連結清單（含完整 URL）。"""
     if not link_set.has_links():
         return []
     prefix_map = {
