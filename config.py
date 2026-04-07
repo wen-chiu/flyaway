@@ -14,40 +14,24 @@ DEFAULT_DEPARTURE = "TPE"
 
 # ── 目的地清單（依地區分組）───────────────────────────────────────────────────
 WORLD_DESTINATIONS: dict[str, list[str]] = {
-    # ── 日本（獨立群組，涵蓋所有直飛或近程轉機的日本機場）──────────────────
-    "Japan": [
-        "NRT", "HND", "KIX", "NGO", "CTS", "FUK",     # 主要機場
-        "HKD", "AKJ", "SDJ", "HNA", "AXT",             # 北海道/東北
-        "FKS", "KMQ", "HSG", "KMJ", "KOJ",             # 中部/九州
-        "OKJ", "TAK", "HIJ", "KCZ",                    # 中四國
-        "OKA",                                         # 沖繩
-        "MYJ", "OIT", "UKB", "IBR",                    # 松山、大分、神戶、茨城
-    ],
-    "東北亞 NE Asia": [
-        "NRT", "HND", "KIX", "NGO", "CTS", "FUK",     # 日本主要
-        "ICN", "GMP", "PUS", "CJU", "TAE",            # 濟州、大邱
-    ],
-    "東南亞 SE Asia": [
-        "BKK", "DMK", "SIN", "KUL", "MNL", "CGK",
-        "DPS", "HAN", "SGN", "RGN", "REP", "PNH",
-        "VTE", "MDL",
-        "CNX", "PQC", "DAD", "PEN", "CEB",
-    ],
-    "歐洲 Europe": [
-        "LHR", "CDG", "FRA", "AMS", "MAD", "FCO",
-        "BCN", "VIE", "ZRH", "IST", "PRG", "WAW",
-        "ARN", "CPH", "HEL", "ATH", "LIS", "DUB",
-    ],
-    "北美 N America": [
-        "JFK", "LAX", "SFO", "ORD", "YVR", "YYZ",
-        "SEA", "DFW", "MIA", "BOS",
-        "IAH", "ONT",      
-    ],
-    "大洋洲 Oceania": ["SYD", "MEL", "AKL", "BNE", "PER", "ROR"],
-    # "南亞 S Asia": ["DEL", "BOM", "MAA", "BLR", "CMB", "KTM", "DAC"],
-    # "中東 Middle East": ["DXB", "DOH", "AUH", "RUH", "KWI", "AMM", "BEY"],
-    # "非洲 Africa": ["NBO", "JNB", "CAI", "CMN", "ADD"],
-    # "南美 S America": ["GRU", "EZE", "BOG", "LIM", "SCL"],
+    "Japan":    [ "NRT", "HND", "KIX", "NGO", "CTS", "FUK",
+                  "HKD", "AKJ", "SDJ", "HNA", "AXT", "FKS", "KMQ", 
+                  "HSG", "KMJ", "KOJ", "OKJ", "TAK", "HIJ", "KCZ",
+                  "OKA", "MYJ", "OIT", "UKB", "IBR"],
+    "東北亞 NE Asia":    ["GMP", "ICN", "PUS", "OKA", "CJU", "TAE"],
+    "東南亞 SE Asia":    ["BKK", "DMK", "SIN", "KUL", "MNL", "CGK",
+                          "DPS", "HAN", "SGN", "RGN", "REP", "PNH",
+                          "VTE", "MDL"],
+    "歐洲 Europe":       ["LHR", "CDG", "FRA", "AMS", "MAD", "FCO",
+                          "BCN", "VIE", "ZRH", "IST", "PRG", "WAW",
+                          "ARN", "CPH", "HEL", "ATH", "LIS", "DUB"],
+    "北美 N America":    ["JFK", "LAX", "SFO", "ORD", "YVR", "YYZ",
+                          "SEA", "DFW", "MIA", "BOS"],
+    "大洋洲 Oceania":    ["SYD", "MEL", "AKL", "BNE", "PER"],
+    # "南亞 S Asia":       ["DEL", "BOM", "MAA", "BLR", "CMB", "KTM", "DAC"],
+    # "中東 Middle East":  ["DXB", "DOH", "AUH", "RUH", "KWI", "AMM", "BEY"],
+    # "非洲 Africa":       ["NBO", "JNB", "CAI", "CMN", "ADD"],
+    # "南美 S America":    ["GRU", "EZE", "BOG", "LIM", "SCL"],
 }
 
 ALL_DESTINATIONS: list[str] = list(dict.fromkeys(  # deduplicate while preserving order
@@ -75,10 +59,10 @@ NON_ASIA_DESTINATIONS: list[str] = list(dict.fromkeys(
 # ── 航點轉機規則 ───────────────────────────────────────────────────────────────
 # 東北亞 & 東南亞的「主要機場」→ 只接受直達
 # Japan 群組包含許多小機場（需轉機），不全部強制直達
-NONSTOP_ONLY_REGIONS: set[str] = {"東北亞 NE Asia", "東南亞 SE Asia"}
-
-# Japan 群組中，只有主要城市強制直達；其餘允許轉機
-JAPAN_NONSTOP_AIRPORTS: set[str] = {"NRT", "HND", "KIX", "NGO", "CTS", "FUK", "OKA"}
+NONSTOP_ONLY_REGIONS: set[str] = {"Japan", "東北亞 NE Asia", "東南亞 SE Asia"}
+INTERCONTINENTAL_REGIONS: set[str] = {
+    "歐洲 Europe", "北美 N America", "大洋洲 Oceania", "非洲 Africa", "南美 S America"
+}
 
 # ── 自訂最愛目的地 ─────────────────────────────────────────────────────────────
 MY_DESTINATIONS: list[str] = [
@@ -107,21 +91,17 @@ def get_region(airport: str) -> str:
 def get_max_stops_for(airport: str, default_max: int = 2) -> int:
     """
     依目的地決定 max_stops：
-    - 東北亞 NE Asia / 東南亞 SE Asia → 0（直達）
-    - Japan 主要機場（NRT/HND/KIX/NGO/CTS/FUK/OKA）→ 0（直達）
-    - Japan 其他小機場 → default_max（需轉機）
+    - Japan / 東北亞 NE Asia / 東南亞 SE Asia → 0（直達）
     - 其他地區 → default_max
     """
     code = airport.upper()
     region = get_region(code)
     if region in NONSTOP_ONLY_REGIONS:
         return 0
-    if region == "Japan" and code in JAPAN_NONSTOP_AIRPORTS:
-        return 0
     return default_max
 
 def is_intercontinental(airport: str) -> bool:
-    return get_region(airport) in NON_ASIA_REGIONS
+    return get_region(airport) in INTERCONTINENTAL_REGIONS
 
 # ── 飛行限制 ───────────────────────────────────────────────────────────────────
 MAX_STOPS          = 2
