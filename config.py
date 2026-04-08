@@ -18,8 +18,13 @@ WORLD_DESTINATIONS: dict[str, list[str]] = {
                   "HKD", "AKJ", "SDJ", "HNA", "AXT", "FKS", "KMQ", 
                   "HSG", "KMJ", "KOJ", "OKJ", "TAK", "HIJ", "KCZ",
                   "OKA", "MYJ", "OIT", "UKB", "IBR"],
+<<<<<<< Updated upstream
     "東北亞 NE Asia": ["NRT", "HND", "KIX", "NGO", "CTS", "FUK", "ICN"],
     "東南亞 SE Asia":    ["BKK", "DMK", "SIN", "KUL", "MNL", "CGK",
+=======
+    "東北亞 NE Asia": ["ICN", "PUS", "CJU", "TAE", "CJJ"],
+    "東南亞 SE Asia":    ["BKK", "DMK", "SIN", "KUL", "CGK",  # "MNL",
+>>>>>>> Stashed changes
                           "DPS", "HAN", "SGN", "RGN", "REP", "PNH",
                           "VTE", "MDL"],
     "歐洲 Europe":       ["LHR", "CDG", "FRA", "AMS", "MAD", "FCO",
