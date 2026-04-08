@@ -306,140 +306,98 @@ def cmd_search(args: argparse.Namespace) -> None:
     # ── 目的地 ────────────────────────────────────────────────────────────────
     # Country / city name aliases → maps casual names to IATA lists
     _DEST_ALIASES: dict[str, list[str]] = {
-        # 國家名稱（英文）
+        # 國家 / 常用英文別名
         "japan":       ["NRT", "HND", "KIX", "NGO", "CTS", "FUK"],
         "korea":       ["ICN", "GMP", "PUS"],
+        "hongkong":    ["HKG", "MFM"],
         "thailand":    ["BKK", "DMK"],
         "singapore":   ["SIN"],
         "malaysia":    ["KUL"],
-        "indonesia":   ["CGK", "DPS"],
         "philippines": ["MNL"],
+        "indonesia":   ["CGK", "DPS"],
         "vietnam":     ["HAN", "SGN"],
-        "hongkong":    ["HKG"],
+        "cambodia":    ["REP", "PNH"],
+        "myanmar":     ["RGN", "MDL"],
+        "laos":        ["VTE"],
+        "india":       ["DEL", "BOM", "MAA", "BLR"],
+        "srilanka":    ["CMB"],
+        "nepal":       ["KTM"],
+        "bangladesh":  ["DAC"],
         "uk":          ["LHR"],
         "france":      ["CDG"],
         "germany":     ["FRA"],
-        "usa":         ["JFK", "LAX", "SFO", "ORD", "SEA", "DFW", "MIA", "BOS"],
-        "usa":         ["JFK", "LAX", "SFO", "ORD", "SEA"],
-        "canada":      ["YVR", "YYZ"],
+        "netherlands": ["AMS"],
+        "spain":       ["MAD", "BCN"],
+        "italy":       ["FCO"],
+        "austria":     ["VIE"],
+        "switzerland": ["ZRH"],
+        "turkey":      ["IST"],
+        "czechia":     ["PRG"],
+        "poland":      ["WAW"],
+        "sweden":      ["ARN"],
+        "denmark":     ["CPH"],
+        "finland":     ["HEL"],
+        "greece":      ["ATH"],
+        "portugal":    ["LIS"],
+        "ireland":     ["DUB"],
         "australia":   ["SYD", "MEL", "BNE", "PER"],
-        # 城市名稱（英文）
-        "tokyo":       ["NRT", "HND"],
-        "osaka":       ["KIX"],
-        "nagoya":      ["NGO"],
-        "sapporo":     ["CTS"],
-        "fukuoka":     ["FUK"],
-        "seoul":       ["ICN", "GMP"],
-        "busan":       ["PUS"],
-        "bangkok":     ["BKK", "DMK"],
-        "kualalumpur": ["KUL"],
-        "bali":        ["DPS"],
-        "jakarta":     ["CGK"],
-        "hanoi":       ["HAN"],
-        "hochiminh":   ["SGN"],
-        "dubai":       ["DXB"],
-        "london":      ["LHR"],
-        "paris":       ["CDG"],
-        "frankfurt":   ["FRA"],
-        "amsterdam":   ["AMS"],
-        "newyork":     ["JFK"],
-        "losangeles":  ["LAX"],
-        "sydney":      ["SYD"],
-        "melbourne":   ["MEL"],
-        # 中文城市名
-        "東京":        ["NRT", "HND"],
-        "大阪":        ["KIX"],
-        "首爾":        ["ICN", "GMP"],
-        "曼谷":        ["BKK", "DMK"],
-        "新加坡":      ["SIN"],
-        "香港":        ["HKG"],
-        "吉隆坡":      ["KUL"],
-        "峇里島":      ["DPS"],
-        "日本":        ["NRT", "HND", "KIX", "NGO", "CTS", "FUK"],
-        "韓國":        ["ICN", "GMP", "PUS"],
-        "泰國":        ["BKK", "DMK"],
-        "歐洲":        WORLD_DESTINATIONS.get("歐洲 Europe", []),
-        "北美":        WORLD_DESTINATIONS.get("北美 N America", []),
+        "newzealand":  ["AKL"],
+        # 地區英文縮寫（去除空格後比對）
+        "neasia":      ["NRT", "HND", "KIX", "NGO", "CTS", "FUK", "ICN", "GMP", "PUS", "HKG", "MFM"],
+        "seasia":      ["BKK", "DMK", "SIN", "KUL", "MNL", "CGK", "DPS", "HAN", "SGN"],
+        "europe":      list(WORLD_DESTINATIONS.get("歐洲 Europe", [])),
+        "oceania":     list(WORLD_DESTINATIONS.get("大洋洲 Oceania", [])),
+        "sasia":       list(WORLD_DESTINATIONS.get("南亞 S Asia", [])),
     }
 
     destinations: List[str] = []
     dest_arg = getattr(args, "dest", None)
     if dest_arg:
         dest_up = dest_arg.upper()
-        dest_low = dest_arg.lower().replace(" ", "").replace("-", "")
+        dest_key = dest_arg.lower().replace(" ", "").replace("-", "")
+
         if dest_up == "ALL":
             destinations = ALL_DESTINATIONS
-        elif dest_up == "MY" or dest_up == "MINE":
+        elif dest_up in ("MY", "MINE"):
             from config import MY_DESTINATIONS
             destinations = MY_DESTINATIONS
         elif dest_arg in WORLD_DESTINATIONS:
-            # Exact region name match e.g. "東北亞 NE Asia"
             destinations = WORLD_DESTINATIONS[dest_arg]
-        elif dest_low in _DEST_ALIASES:
-            # Country/city alias e.g. "japan", "Tokyo"
-            destinations = _DEST_ALIASES[dest_low]
-        elif dest_arg in _DEST_ALIASES:
-            destinations = _DEST_ALIASES[dest_arg]
+        elif dest_key in _DEST_ALIASES:
+            # e.g. "Japan", "japan", "JAPAN", "New Zealand", "neasia"
+            destinations = _DEST_ALIASES[dest_key]
         else:
-            # Try partial region name match
-            matched_region = next(
-                (codes for region, codes in WORLD_DESTINATIONS.items()
-                 if dest_arg.lower() in region.lower()),
+            # Try partial match on region keys (e.g. "NE Asia" matches "東北亞 NE Asia")
+            region_match = next(
+                (v for k, v in WORLD_DESTINATIONS.items()
+                 if dest_arg.lower() in k.lower()),
                 None
             )
-            if matched_region:
-                destinations = matched_region
+            if region_match:
+                destinations = region_match
             else:
+                # Try FAVOURITE_GROUPS
                 from config import FAVOURITE_GROUPS
-                matched_fav = next(
+                fav_match = next(
                     (v for k, v in FAVOURITE_GROUPS.items() if dest_arg in k), None
                 )
-                if matched_fav:
-                    destinations = matched_fav
+                if fav_match:
+                    destinations = fav_match
                 else:
-                    # Treat as IATA codes (comma-separated)
-                    destinations = [c.strip().upper() for c in dest_arg.split(",") if c.strip()]
-    else:
-        from config import MY_DESTINATIONS, FAVOURITE_GROUPS
-        # Build unified menu: favourites first, then regions, then ALL
-        menu_entries: list[tuple[str, list[str]]] = []
-        if MY_DESTINATIONS:
-            menu_entries.append(("⭐ 我的最愛", MY_DESTINATIONS))
-        for grp_name, grp_codes in FAVOURITE_GROUPS.items():
-            if grp_codes:
-                menu_entries.append((grp_name, grp_codes))
-        for region_name, region_codes in WORLD_DESTINATIONS.items():
-            nonstop_tag = "（僅直達）" if region_name in NONSTOP_ONLY_REGIONS else ""
-            menu_entries.append((f"{region_name}{nonstop_tag}", region_codes))
-        menu_entries.append(("全部 ALL", ALL_DESTINATIONS))
-        menu_entries.append(("✏️  自訂代碼", []))
-
-        if _HAS_RICH:
-            _print("\n[bold]選擇目的地：[/bold]")
-            for i, (label, codes) in enumerate(menu_entries, 1):
-                count = f" [dim]({len(codes)} 個航點)[/dim]" if codes else ""
-                console.print(f"  [cyan]{i:>2}[/cyan]. {label}{count}")
-            idx = IntPrompt.ask("  輸入編號", default=1) - 1
-        else:
-            print("\n選擇目的地：")
-            for i, (label, codes) in enumerate(menu_entries, 1):
-                count = f" ({len(codes)} 個)" if codes else ""
-                print(f"  {i:>2}. {label}{count}")
-            print("  輸入編號: ", end="")
-            try:
-                idx = int(input().strip()) - 1
-            except ValueError:
-                idx = 0
-
-        if 0 <= idx < len(menu_entries):
-            label, codes = menu_entries[idx]
-            if label.startswith("✏️"):
-                raw = _ask("輸入機場代碼（逗號分隔，如 NRT,KIX,BKK）")
-                destinations = [c.strip().upper() for c in raw.split(",") if c.strip()]
-            else:
-                destinations = codes
-        else:
-            destinations = MY_DESTINATIONS or ALL_DESTINATIONS
+                    # Treat as raw IATA code(s)
+                    raw_codes = [c.strip().upper() for c in dest_arg.split(",")]
+                    # Warn if any code looks invalid (not 3 capital letters)
+                    invalid = [c for c in raw_codes if not (len(c) == 3 and c.isalpha())]
+                    if invalid:
+                        _print(
+                            f"[yellow]⚠️ 無法識別的目的地：{', '.join(invalid)}。"
+                            f"請使用 IATA 代碼（如 NRT）、國家名（如 Japan）"
+                            f"或地區名（如 歐洲 Europe）。[/yellow]"
+                            if _HAS_RICH else
+                            f"⚠️ 無法識別的目的地：{', '.join(invalid)}。"
+                        )
+                        return
+                    destinations = raw_codes
 
     # ── 行程類型提示 ──────────────────────────────────────────────────────────
     nonstop_dests  = [d for d in destinations if get_max_stops_for(d, MAX_STOPS) == 0]

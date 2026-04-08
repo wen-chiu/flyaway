@@ -391,57 +391,46 @@ def print_vacation_summary(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def export_csv(records: List[FlightRecord], filename: Optional[str] = None) -> Path:
+    from flight_scraper import build_booking_url
+    from config import get_max_stops_for
+
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     if not filename:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"flights_{ts}.csv"
     path = REPORT_DIR / filename
 
-    # 嘗試取得訂票連結
-    try:
-        from booking_links import BookingLinkFactory
-        _links = True
-    except Exception:
-        _links = False
-
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        header = [
+        writer.writerow([
             "排名", "票種", "航空類型",
             "目的地代碼", "目的地",
             "出發機場", "去程日", "回程日",
-            "去程時間", "抵達時間", "去程時長(分)", "轉機",
-            "回程時間", "回程抵達", "回程時長(分)",
+            "去程時間", "抵達時間", "飛行時長(分)", "轉機",
             "航空公司", "航班號", "票價", "幣別", "資料時間",
-            "Google Flights 連結",
-            "航空公司官網連結",
-        ]
-        writer.writerow(header)
+            "訂票連結",  # ← NEW
+        ])
 
         for i, r in enumerate(sorted(records, key=lambda x: x.price), 1):
-            google_url    = ""
-            airline_url   = ""
-            if _links:
-                try:
-                    ls = BookingLinkFactory.from_record(r)
-                    if ls.google_link:
-                        google_url = ls.google_link.url
-                    if ls.airline_links:
-                        airline_url = ls.airline_links[0].url
-                except Exception:
-                    pass
+            max_stops = get_max_stops_for(r.arrival_airport)
+            link = build_booking_url(
+                from_airport=r.departure_airport,
+                to_airport=r.arrival_airport,
+                outbound_date=r.departure_date,
+                return_date=r.return_date if r.is_roundtrip else "",
+                max_stops=max_stops,
+            )
             writer.writerow([
                 i,
                 "來回" if r.is_roundtrip else "單程",
                 r.airline_type or "unknown",
                 r.arrival_airport, dest_label(r.arrival_airport),
-                r.departure_airport, r.departure_date, r.return_date or "",
-                r.departure_time, r.arrival_time, r.duration_minutes, r.stops_str,
-                r.return_dep_time or "", r.return_arr_time or "", r.return_duration or 0,
+                r.departure_airport, r.departure_date, r.return_date,
+                r.departure_time, r.arrival_time,
+                r.duration_minutes, r.stops_str,
                 r.airline, r.flight_numbers,
                 r.price, r.currency, r.fetched_at[:19],
-                google_url,
-                airline_url,
+                link,  # ← NEW
             ])
 
     _print(f"[green]✓ CSV 已儲存：{path}[/green]" if _HAS_RICH else f"✓ CSV 已儲存：{path}")

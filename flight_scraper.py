@@ -757,12 +757,67 @@ def _parse_stops_str(text: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def _build_google_flights_url(from_airport: str, to_airport: str, date_str: str) -> str:
-    """Google Flights 通用備用搜尋 URL（當 TFS 捕捉失敗時使用）。"""
-    from urllib.parse import urlencode
-    params = {"q": f"Flights from {from_airport} to {to_airport}", "hl": "zh-TW"}
-    return f"https://www.google.com/travel/flights?{urlencode(params)}"
+# ── booking URL helpers ───────────────────────────────────────────────────────
 
+def build_booking_url(
+    from_airport: str,
+    to_airport: str,
+    outbound_date: str,
+    return_date: str = "",
+    max_stops: int = 2,
+) -> str:
+    """
+    Generate a valid, clickable Google Flights URL using TFSData.as_b64().
+    Falls back to a plain-text search URL if fast-flights is unavailable.
+
+    BUG FIX: Previously the tfs= parameter was set to str(TFSData(...)),
+    which produces a Python repr string — not a valid URL parameter.
+    The correct call is TFSData(...).as_b64().
+    """
+    try:
+        from fast_flights import TFSData, FlightData as FF_FlightData
+        legs = [FF_FlightData(
+            date=outbound_date,
+            from_airport=from_airport,
+            to_airport=to_airport,
+        )]
+        if return_date:
+            legs.append(FF_FlightData(
+                date=return_date,
+                from_airport=to_airport,
+                to_airport=from_airport,
+            ))
+        # Pass max_stops only when it is restrictive (0 or 1);
+        # None means "any number of stops" in the TFS schema.
+        tfs_max = max_stops if max_stops < 2 else None
+        tfs = TFSData(flight_data=legs, max_stops=tfs_max)
+        encoded = tfs.as_b64()          # ← CORRECT: base64 protobuf string
+        return (
+            f"https://www.google.com/travel/flights"
+            f"?tfs={encoded}&hl=zh-TW&tfu=EgQIABABIgA"
+        )
+    except Exception as e:
+        logger.debug(f"build_booking_url TFS encode failed ({e}), using fallback URL")
+        return _build_google_flights_url(from_airport, to_airport, outbound_date)
+
+
+def _build_google_flights_url(
+    from_airport: str,
+    to_airport: str,
+    date_str: str,
+    adults: int = 1,
+) -> str:
+    """
+    Simple fallback Google Flights search URL (no TFS encoding).
+    Used by Playwright backend and as a safety fallback.
+    """
+    base = "https://www.google.com/travel/flights"
+    params = (
+        f"?q=Flights+from+{from_airport}+to+{to_airport}"
+        f"+on+{date_str}"
+        f"&hl=zh-TW&curr=TWD"
+    )
+    return base + params
 
 def build_date_range(center_date: date, flexibility_days: int = 3) -> List[date]:
     return [
