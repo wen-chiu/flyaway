@@ -3,22 +3,23 @@ booking_links.py — 訂票連結產生器
 =====================================
 設計原則
 --------
-1. Google Flights 搜尋連結（來自 fast-flights TFS URL）— 最精確，永遠優先顯示
+1. Google Flights 搜尋連結（TFS 編碼 URL）— 最精確，永遠優先顯示
 2. 航空公司官網直達連結 — 由航線參數組合，作為備用管道
-3. 其他代理商 — 暫停啟用，待評估後逐步開放
+3. 代理商連結 — 由 AGENT_PRIORITY 控制，預設全停用，待評估後逐步開放
 
 連結來源說明
 ------------
-Google Flights 連結有兩種品質：
-  - TFS URL（精確）：從 fast-flights 搜尋時捕捉的 tfs= 參數，
-    直接對應到該航線、日期的搜尋結果頁
-  - Generic URL（備用）：當 TFS 捕捉失敗時，用 from/to/date 參數構成
-    的 Google Flights 搜尋 URL
+Google Flights 連結：
+  使用 flight_scraper.build_booking_url() 產生 TFS 編碼 URL，
+  直接對應到該航線、日期的搜尋結果頁。
 
-航空公司官網連結
----------------
-使用各航空公司的查詢參數 URL。由於各家公司可能更新 URL 結構，
-建議定期驗證有效性。新增航空公司只需在 _ALL_AIRLINE_BUILDERS 追加 class。
+航空公司官網連結：
+  使用各航空公司的查詢參數 URL。由於各家公司可能更新 URL 結構，
+  建議定期驗證有效性。新增航空公司只需在 _ALL_AIRLINE_BUILDERS 追加 class。
+
+代理商連結（目前停用）：
+  架構保留，未來評估後在 AGENT_PRIORITY 解除註解即可啟用。
+  Playwright 批次擷取（精確取得代理人直售連結）也保留為未來擴充點。
 
 架構
 ----
@@ -30,9 +31,15 @@ Google Flights 連結有兩種品質：
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from urllib.parse import urlencode
+
+if TYPE_CHECKING:
+    from database import FlightRecord
+
+logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -40,8 +47,6 @@ from urllib.parse import urlencode
 # ══════════════════════════════════════════════════════════════════════════════
 
 # 代理商優先順序
-# TODO: 評估各代理商的服務品質、手續費、退改票彈性後調整順序
-# 格式：(agent_id, 顯示名稱, 說明)
 # 要啟用某代理商：取消 # 號後重啟程式，不需要其他改動
 AGENT_PRIORITY: list[tuple[str, str]] = [
     # ("skyscanner",   "Skyscanner"),    # TODO: 評估手續費後開放
@@ -51,7 +56,7 @@ AGENT_PRIORITY: list[tuple[str, str]] = [
 ]
 
 MAX_AIRLINE_LINKS: int = 2   # 最多顯示幾個航空公司官網連結
-MAX_AGENT_LINKS:  int = 2    # 最多顯示幾個代理商連結
+MAX_AGENT_LINKS:   int = 2   # 最多顯示幾個代理商連結
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -62,23 +67,23 @@ MAX_AGENT_LINKS:  int = 2    # 最多顯示幾個代理商連結
 class BookingLink:
     label:             str
     url:               str
-    is_google_flights: bool = False   # True = Google Flights（無論 TFS 或 generic）
+    is_google_flights: bool = False   # True = Google Flights
     is_direct:         bool = False   # True = 航空公司官網
     priority:          int  = 99
 
     def __str__(self) -> str:
         if self.is_google_flights:
-            return f"🔍 {self.label}: {self.url}"
+            return f"🔍 {self.label}:\n     {self.url}"
         if self.is_direct:
-            return f"✈  {self.label}: {self.url}"
-        return f"🔗 {self.label}: {self.url}"
+            return f"✈  {self.label}:\n     {self.url}"
+        return f"🔗 {self.label}:\n     {self.url}"
 
 
 @dataclass
 class BookingLinkSet:
-    google_link:   Optional[BookingLink]      = None   # Google Flights（TFS 或 generic）
-    airline_links: List[BookingLink]          = field(default_factory=list)
-    agent_links:   List[BookingLink]          = field(default_factory=list)
+    google_link:   Optional[BookingLink] = None
+    airline_links: List[BookingLink]     = field(default_factory=list)
+    agent_links:   List[BookingLink]     = field(default_factory=list)
 
     @property
     def all_links(self) -> List[BookingLink]:
@@ -91,8 +96,16 @@ class BookingLinkSet:
 
     @property
     def primary(self) -> Optional[BookingLink]:
-        all_ = self.all_links
-        return all_[0] if all_ else None
+        """最優先的訂票連結（通常是航空公司直售，若無則 Google Flights）。"""
+        # Prefer airline direct over Google Flights
+        if self.airline_links:
+            return self.airline_links[0]
+        return self.google_link
+
+    @property
+    def google_or_primary(self) -> Optional[BookingLink]:
+        """Google Flights 連結（CSV 用）。"""
+        return self.google_link
 
     def has_links(self) -> bool:
         return bool(self.google_link or self.airline_links or self.agent_links)
@@ -102,42 +115,36 @@ class BookingLinkSet:
 #  Google Flights URL 建構
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_google_flights_link(
-    from_airport: str,
-    to_airport:   str,
-    depart_date:  str,
-    return_date:  str = "",
-    tfs_url:      str = "",
-) -> BookingLink:
+def _build_google_flights_link(record: "FlightRecord") -> BookingLink:
     """
-    建立 Google Flights 連結。
-    若有 TFS URL（從 fast-flights 搜尋時捕捉），使用精確 TFS 連結。
-    否則構建基本搜尋 URL。
+    建立 Google Flights TFS 編碼連結。
+    使用 flight_scraper.build_booking_url() 產生精確的 TFS URL。
     """
-    if tfs_url and "tfs=" in tfs_url:
-        # 精確 TFS URL：直接對應到該航線的搜尋結果頁
-        url   = tfs_url
-        label = "Google Flights 搜尋結果"
-    else:
-        # Fallback: 使用 Google Flights 的深度連結格式
-        # 此 URL 會直接帶入出發地、目的地和日期，讓使用者看到搜尋結果
-        if return_date:
-            url = (
-                f"https://www.google.com/travel/flights/search?"
-                f"q=flights+from+{from_airport}+to+{to_airport}"
-                f"+{depart_date}+return+{return_date}"
-                f"&hl=zh-TW"
-            )
+    # Lazy import to avoid circular dependency (flight_scraper → booking_links would be circular)
+    try:
+        from flight_scraper import build_booking_url
+        url = build_booking_url(
+            from_airport=record.departure_airport,
+            to_airport=record.arrival_airport,
+            outbound_date=record.departure_date,
+            return_date=record.return_date if record.is_roundtrip else "",
+            max_stops=record.stops if record.stops >= 0 else 2,
+        )
+    except Exception as e:
+        logger.debug(f"build_booking_url failed: {e}, using generic URL")
+        dep = record.departure_airport
+        arr = record.arrival_airport
+        d   = record.departure_date
+        r   = record.return_date or ""
+        if r:
+            url = (f"https://www.google.com/travel/flights/search?"
+                   f"q=flights+from+{dep}+to+{arr}+{d}+return+{r}&hl=zh-TW")
         else:
-            url = (
-                f"https://www.google.com/travel/flights/search?"
-                f"q=flights+from+{from_airport}+to+{to_airport}+{depart_date}"
-                f"&hl=zh-TW"
-            )
-        label = f"Google Flights {from_airport}→{to_airport}"
+            url = (f"https://www.google.com/travel/flights/search?"
+                   f"q=flights+from+{dep}+to+{arr}+{d}&hl=zh-TW")
 
     return BookingLink(
-        label=label,
+        label="Google Flights 搜尋結果",
         url=url,
         is_google_flights=True,
         is_direct=False,
@@ -158,7 +165,7 @@ class _AirlineBuilder:
 
     @classmethod
     def matches(cls, airline_name: str) -> bool:
-        n = airline_name.lower()
+        n = airline_name.lower().strip()
         return any(kw in n for kw in cls.KEYWORDS)
 
     @classmethod
@@ -176,7 +183,7 @@ class _AirlineBuilder:
 # ── 台灣本土航空 ──────────────────────────────────────────────────────────────
 
 class EvaAirBuilder(_AirlineBuilder):
-    KEYWORDS = ("eva air", "eva", "evaair")
+    KEYWORDS = ("eva air", "eva", "evaair", "長榮")
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
         trip = "RT" if return_date else "OW"
@@ -191,7 +198,7 @@ class EvaAirBuilder(_AirlineBuilder):
 
 
 class ChinaAirlinesBuilder(_AirlineBuilder):
-    KEYWORDS = ("china airlines", "china air")
+    KEYWORDS = ("china airlines", "china air", "中華航空", "中华航空")
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
         params = {
@@ -224,7 +231,15 @@ class StarluxBuilder(_AirlineBuilder):
         )
 
 
-# ── 亞太傳統航空 ──────────────────────────────────────────────────────────────
+class MandarinAirlinesBuilder(_AirlineBuilder):
+    KEYWORDS = ("mandarin airlines", "華信", "华信")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        # Mandarin is a regional subsidiary of China Airlines; redirect to CI booking
+        return ChinaAirlinesBuilder.build(from_airport, to_airport, depart_date, return_date, adults)
+
+
+# ── 港澳 ──────────────────────────────────────────────────────────────────────
 
 class CathayBuilder(_AirlineBuilder):
     KEYWORDS = ("cathay pacific", "cathay", "國泰", "国泰")
@@ -239,6 +254,23 @@ class CathayBuilder(_AirlineBuilder):
             is_direct=True, priority=10,
         )
 
+
+class HongKongExpressBuilder(_AirlineBuilder):
+    KEYWORDS = ("hong kong express", "hk express", "香港快運", "香港快运")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="香港快運 HK Express",
+            url=(f"https://www.hkexpress.com/zh-tw/booking/book-flight?"
+                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
+                 f"&departureDate={depart_date}{ret}&adults={adults}"),
+            is_direct=True, priority=10,
+        )
+
+
+# ── 日本航空 ──────────────────────────────────────────────────────────────────
 
 class JalBuilder(_AirlineBuilder):
     KEYWORDS = ("jal", "japan airlines", "日本航空")
@@ -270,80 +302,17 @@ class AnaBuilder(_AirlineBuilder):
         )
 
 
-class KoreanAirBuilder(_AirlineBuilder):
-    KEYWORDS = ("korean air", "대한항공")
+class PeachBuilder(_AirlineBuilder):
+    KEYWORDS = ("peach", "樂桃", "乐桃")
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
         trip = "RT" if return_date else "OW"
-        ret  = f"&returnDate={return_date.replace('-','')}" if return_date else ""
-        return BookingLink(
-            label="大韓航空 Korean Air",
-            url=(f"https://www.koreanair.com/booking/flight-search?"
-                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
-                 f"&departureDate={depart_date.replace('-','')}{ret}&adultCount={adults}"),
-            is_direct=True, priority=10,
-        )
-
-
-class SingaporeAirlinesBuilder(_AirlineBuilder):
-    KEYWORDS = ("singapore airlines", "sq ", "新加坡航空")
-    @classmethod
-    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
-        trip = "R" if return_date else "O"
         ret  = f"&returnDate={return_date}" if return_date else ""
         return BookingLink(
-            label="新加坡航空 SQ",
-            url=(f"https://www.singaporeair.com/en_UK/us/plan-travel/book-a-flight/"
-                 f"?tripType={trip}&origin={from_airport}&destination={to_airport}"
-                 f"&departureDate={depart_date}{ret}&adults={adults}"),
-            is_direct=True, priority=10,
-        )
-
-
-class BritishAirwaysBuilder(_AirlineBuilder):
-    KEYWORDS = ("british airways",)
-    @classmethod
-    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
-        trip = "R" if return_date else "O"
-        ret  = f"&returnDate={return_date}" if return_date else ""
-        return BookingLink(
-            label="英國航空 British Airways",
-            url=(f"https://www.britishairways.com/travel/book/public/en_tw?"
-                 f"eId=106011&Oc={from_airport}&Dc={to_airport}"
-                 f"&OS={depart_date}{ret}&AD={adults}&PA={trip}"),
-            is_direct=True, priority=10,
-        )
-
-
-class LufthansaBuilder(_AirlineBuilder):
-    KEYWORDS = ("lufthansa", "漢莎")
-    @classmethod
-    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
-        trip = "R" if return_date else "O"
-        ret  = f"&triptype=R&returnDate={return_date}" if return_date else ""
-        return BookingLink(
-            label="漢莎航空 Lufthansa",
-            url=(f"https://www.lufthansa.com/tw/en/flight-search?"
-                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
-                 f"&departureDate={depart_date}{ret}&adults={adults}"),
-            is_direct=True, priority=10,
-        )
-
-
-# ── 亞太廉航 ─────────────────────────────────────────────────────────────────
-
-class ScootBuilder(_AirlineBuilder):
-    KEYWORDS = ("scoot", "酷航")
-    @classmethod
-    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
-        trip = "R" if return_date else "O"
-        ret  = f"&returnDate={return_date}" if return_date else ""
-        return BookingLink(
-            label="酷航 Scoot",
-            url=(f"https://www.flyscoot.com/zhtw/book/book-a-flight"
-                 f"?tripType={trip}&originStation={from_airport}"
-                 f"&destinationStation={to_airport}&departureDate={depart_date}"
-                 f"{ret}&adultCount={adults}"),
+            label="樂桃航空 Peach",
+            url=(f"https://www.flypeach.com/tw/lm/ai/airports/roundtrip?"
+                 f"from={from_airport}&to={to_airport}&departure={depart_date}"
+                 f"{ret}&paxAdult={adults}&type={trip}"),
             is_direct=True, priority=20,
         )
 
@@ -363,29 +332,94 @@ class JetstarBuilder(_AirlineBuilder):
         )
 
 
-class PeachBuilder(_AirlineBuilder):
-    KEYWORDS = ("peach", "樂桃")
+# ── 韓國 ─────────────────────────────────────────────────────────────────────
+
+class KoreanAirBuilder(_AirlineBuilder):
+    KEYWORDS = ("korean air", "大韓航空", "대한항공")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "RT" if return_date else "OW"
+        ret  = f"&returnDate={return_date.replace('-', '')}" if return_date else ""
+        return BookingLink(
+            label="大韓航空 Korean Air",
+            url=(f"https://www.koreanair.com/booking/flight-search?"
+                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
+                 f"&departureDate={depart_date.replace('-', '')}{ret}&adultCount={adults}"),
+            is_direct=True, priority=10,
+        )
+
+
+class AsianaBuilder(_AirlineBuilder):
+    KEYWORDS = ("asiana", "韓亞", "아시아나")
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
         trip = "RT" if return_date else "OW"
         ret  = f"&returnDate={return_date}" if return_date else ""
         return BookingLink(
-            label="樂桃航空 Peach",
-            url=(f"https://www.flypeach.com/tw/lm/ai/airports/roundtrip?"
-                 f"from={from_airport}&to={to_airport}&departure={depart_date}"
-                 f"{ret}&paxAdult={adults}&type={trip}"),
+            label="韓亞航空 Asiana",
+            url=(f"https://flyasiana.com/C/TW/ZH/booking/availability?"
+                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
+                 f"&departDate={depart_date}{ret}&adults={adults}"),
+            is_direct=True, priority=10,
+        )
+
+
+class JejuAirBuilder(_AirlineBuilder):
+    KEYWORDS = ("jeju air", "濟州", "제주항공")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "RT" if return_date else "OW"
+        ret  = f"&returnDate={return_date.replace('-','')}" if return_date else ""
+        return BookingLink(
+            label="濟州航空 Jeju Air",
+            url=(f"https://www.jejuair.net/jejuair/en/booking/selectFlight.do?"
+                 f"tripType={trip}&depAirportCode={from_airport}&arrAirportCode={to_airport}"
+                 f"&depDate={depart_date.replace('-','')}{ret}&adultCnt={adults}"),
+            is_direct=True, priority=20,
+        )
+
+
+# ── 東南亞 ────────────────────────────────────────────────────────────────────
+
+class SingaporeAirlinesBuilder(_AirlineBuilder):
+    KEYWORDS = ("singapore airlines", "新加坡航空", "sq ")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="新加坡航空 Singapore Airlines",
+            url=(f"https://www.singaporeair.com/en_UK/us/plan-travel/book-a-flight/"
+                 f"?tripType={trip}&origin={from_airport}&destination={to_airport}"
+                 f"&departureDate={depart_date}{ret}&adults={adults}"),
+            is_direct=True, priority=10,
+        )
+
+
+class ScootBuilder(_AirlineBuilder):
+    KEYWORDS = ("scoot", "酷航")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="酷航 Scoot",
+            url=(f"https://www.flyscoot.com/zhtw/book/book-a-flight"
+                 f"?tripType={trip}&originStation={from_airport}"
+                 f"&destinationStation={to_airport}&departureDate={depart_date}"
+                 f"{ret}&adultCount={adults}"),
             is_direct=True, priority=20,
         )
 
 
 class TigerairTWBuilder(_AirlineBuilder):
-    KEYWORDS = ("tigerair taiwan", "tiger air", "台灣虎航")
+    KEYWORDS = ("tigerair taiwan", "tiger air", "台灣虎航", "台湾虎航")
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
         trip = "RT" if return_date else "OW"
         ret  = f"&ReturnDate={return_date}" if return_date else ""
         return BookingLink(
-            label="台灣虎航 Tigerair",
+            label="台灣虎航 Tigerair Taiwan",
             url=(f"https://www.tigerairtw.com/zh-tw/booking/search?"
                  f"trip={trip}&from={from_airport}&to={to_airport}"
                  f"&DepartureDate={depart_date}{ret}&adults={adults}"),
@@ -394,7 +428,7 @@ class TigerairTWBuilder(_AirlineBuilder):
 
 
 class AirAsiaBuilder(_AirlineBuilder):
-    KEYWORDS = ("airasia", "air asia", "亞洲航空")
+    KEYWORDS = ("airasia", "air asia", "亞洲航空", "亚洲航空")
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
         trip = "R" if return_date else "O"
@@ -405,6 +439,66 @@ class AirAsiaBuilder(_AirlineBuilder):
                  f"origin={from_airport}&destination={to_airport}"
                  f"&departureDate={depart_date}{ret}&adult={adults}&tripType={trip}"),
             is_direct=True, priority=20,
+        )
+
+
+class MalaysiaAirlinesBuilder(_AirlineBuilder):
+    KEYWORDS = ("malaysia airlines", "馬來西亞航空", "马来西亚航空")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "RT" if return_date else "OW"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="馬來西亞航空 Malaysia Airlines",
+            url=(f"https://www.malaysiaairlines.com/tw/zh/flight-search.html?"
+                 f"tripType={trip}&from={from_airport}&to={to_airport}"
+                 f"&departDate={depart_date}{ret}&adults={adults}"),
+            is_direct=True, priority=10,
+        )
+
+
+class ThaiAirwaysBuilder(_AirlineBuilder):
+    KEYWORDS = ("thai airways", "泰國航空", "泰国航空", "การบินไทย")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&return_date={return_date}" if return_date else ""
+        return BookingLink(
+            label="泰國航空 Thai Airways",
+            url=(f"https://www.thaiairways.com/en_TH/book_a_flight/search_flights.page?"
+                 f"origin={from_airport}&destination={to_airport}"
+                 f"&departure_date={depart_date}{ret}&adults={adults}&trip_type={trip}"),
+            is_direct=True, priority=10,
+        )
+
+
+class VietjetBuilder(_AirlineBuilder):
+    KEYWORDS = ("vietjet", "越捷")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="越捷航空 VietJet",
+            url=(f"https://www.vietjetair.com/en/pages/search-select-flight?"
+                 f"tripType={trip}&from={from_airport}&to={to_airport}"
+                 f"&departureDate={depart_date}{ret}&adult={adults}"),
+            is_direct=True, priority=20,
+        )
+
+
+class PhilippineAirlinesBuilder(_AirlineBuilder):
+    KEYWORDS = ("philippine airlines", "philippine air", "菲律賓航空", "菲律宾航空")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "RT" if return_date else "OW"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="菲律賓航空 Philippine Airlines",
+            url=(f"https://www.philippineairlines.com/en/ph/home/bookflights?"
+                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
+                 f"&departureDate={depart_date}{ret}&adults={adults}"),
+            is_direct=True, priority=10,
         )
 
 
@@ -423,27 +517,204 @@ class ThaiLionAirBuilder(_AirlineBuilder):
         )
 
 
-# ── 所有航空公司 builder 清單（新增航空公司：在此追加即可）───────────────────
+# ── 中東 ─────────────────────────────────────────────────────────────────────
+
+class EmiratesBuilder(_AirlineBuilder):
+    KEYWORDS = ("emirates", "阿聯酋", "阿联酋")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="阿聯酋航空 Emirates",
+            url=(f"https://www.emirates.com/tw/chinese/booking/flexiCalendar/?"
+                 f"origin={from_airport}&destination={to_airport}"
+                 f"&departureDate={depart_date}{ret}&adult={adults}&type={trip}"),
+            is_direct=True, priority=10,
+        )
+
+
+class QatarAirwaysBuilder(_AirlineBuilder):
+    KEYWORDS = ("qatar airways", "qatar", "卡達", "卡塔尔")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returningDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="卡達航空 Qatar Airways",
+            url=(f"https://www.qatarairways.com/zh-tw/booking/flights?"
+                 f"tripType={trip}&fromStation={from_airport}&toStation={to_airport}"
+                 f"&departingDate={depart_date}{ret}&adults={adults}"),
+            is_direct=True, priority=10,
+        )
+
+
+class TurkishAirlinesBuilder(_AirlineBuilder):
+    KEYWORDS = ("turkish airlines", "土耳其航空")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="土耳其航空 Turkish Airlines",
+            url=(f"https://www.turkishairlines.com/zh-int/flights?"
+                 f"from={from_airport}&to={to_airport}"
+                 f"&departure={depart_date}{ret}&pax={adults}&type={trip}"),
+            is_direct=True, priority=10,
+        )
+
+
+# ── 歐洲 ─────────────────────────────────────────────────────────────────────
+
+class LufthansaBuilder(_AirlineBuilder):
+    KEYWORDS = ("lufthansa", "漢莎", "汉莎")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="漢莎航空 Lufthansa",
+            url=(f"https://www.lufthansa.com/tw/en/flight-search?"
+                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
+                 f"&departureDate={depart_date}{ret}&adults={adults}"),
+            is_direct=True, priority=10,
+        )
+
+
+class BritishAirwaysBuilder(_AirlineBuilder):
+    KEYWORDS = ("british airways", "英國航空", "英国航空")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "R" if return_date else "O"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="英國航空 British Airways",
+            url=(f"https://www.britishairways.com/travel/book/public/en_tw?"
+                 f"eId=106011&Oc={from_airport}&Dc={to_airport}"
+                 f"&OS={depart_date}{ret}&AD={adults}&PA={trip}"),
+            is_direct=True, priority=10,
+        )
+
+
+class AirFranceBuilder(_AirlineBuilder):
+    KEYWORDS = ("air france", "法國航空", "法国航空")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "ROUND_TRIP" if return_date else "ONE_WAY"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="法國航空 Air France",
+            url=(f"https://wwws.airfrance.tw/search/offers?"
+                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
+                 f"&outwardDate={depart_date}{ret}&adults={adults}&cabin=ECONOMY"),
+            is_direct=True, priority=10,
+        )
+
+
+class KlmBuilder(_AirlineBuilder):
+    KEYWORDS = ("klm", "荷蘭皇家", "荷兰皇家")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "ROUND_TRIP" if return_date else "ONE_WAY"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="荷蘭皇家航空 KLM",
+            url=(f"https://www.klm.com/search/offers?"
+                 f"tripType={trip}&origin={from_airport}&destination={to_airport}"
+                 f"&outwardDate={depart_date}{ret}&adults={adults}&cabin=ECONOMY"),
+            is_direct=True, priority=10,
+        )
+
+
+class FinnairBuilder(_AirlineBuilder):
+    KEYWORDS = ("finnair", "芬蘭", "芬兰")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "return" if return_date else "oneway"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="芬蘭航空 Finnair",
+            url=(f"https://www.finnair.com/tw-zh/flights/{from_airport.lower()}-{to_airport.lower()}"
+                 f"?trip={trip}&outbound={depart_date}{ret}&adults={adults}"),
+            is_direct=True, priority=10,
+        )
+
+
+# ── 大洋洲 ────────────────────────────────────────────────────────────────────
+
+class QantasBuilder(_AirlineBuilder):
+    KEYWORDS = ("qantas", "澳洲航空")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "return" if return_date else "oneway"
+        ret  = f"&return={return_date}" if return_date else ""
+        return BookingLink(
+            label="澳洲航空 Qantas",
+            url=(f"https://www.qantas.com/au/en/book-a-trip/flights?"
+                 f"adults={adults}&departure={from_airport}&destination={to_airport}"
+                 f"&travel={depart_date}{ret}&type={trip}"),
+            is_direct=True, priority=10,
+        )
+
+
+class AirNewZealandBuilder(_AirlineBuilder):
+    KEYWORDS = ("air new zealand", "紐西蘭", "纽西兰")
+    @classmethod
+    def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        trip = "return" if return_date else "oneway"
+        ret  = f"&returnDate={return_date}" if return_date else ""
+        return BookingLink(
+            label="紐西蘭航空 Air New Zealand",
+            url=(f"https://www.airnewzealand.co.nz/flights?"
+                 f"origin={from_airport}&destination={to_airport}"
+                 f"&departureDate={depart_date}{ret}&adults={adults}&type={trip}"),
+            is_direct=True, priority=10,
+        )
+
+
+# ── 所有航空公司 builder 清單（新增航空公司：在此追加即可）─────────────────────
 _ALL_AIRLINE_BUILDERS: list[type[_AirlineBuilder]] = [
     # 台灣本土
     EvaAirBuilder,
     ChinaAirlinesBuilder,
     StarluxBuilder,
-    # 亞太傳統
+    MandarinAirlinesBuilder,
+    # 港澳
     CathayBuilder,
+    HongKongExpressBuilder,
+    # 日本
     JalBuilder,
     AnaBuilder,
-    KoreanAirBuilder,
-    SingaporeAirlinesBuilder,
-    BritishAirwaysBuilder,
-    LufthansaBuilder,
-    # 廉航
-    ScootBuilder,
-    JetstarBuilder,
     PeachBuilder,
+    JetstarBuilder,
+    # 韓國
+    KoreanAirBuilder,
+    AsianaBuilder,
+    JejuAirBuilder,
+    # 東南亞 傳統
+    SingaporeAirlinesBuilder,
+    MalaysiaAirlinesBuilder,
+    ThaiAirwaysBuilder,
+    PhilippineAirlinesBuilder,
+    VietjetBuilder,
+    # 東南亞 廉航
+    ScootBuilder,
     TigerairTWBuilder,
     AirAsiaBuilder,
     ThaiLionAirBuilder,
+    # 中東
+    EmiratesBuilder,
+    QatarAirwaysBuilder,
+    TurkishAirlinesBuilder,
+    # 歐洲
+    LufthansaBuilder,
+    BritishAirwaysBuilder,
+    AirFranceBuilder,
+    KlmBuilder,
+    FinnairBuilder,
+    # 大洋洲
+    QantasBuilder,
+    AirNewZealandBuilder,
 ]
 
 
@@ -452,7 +723,7 @@ _ALL_AIRLINE_BUILDERS: list[type[_AirlineBuilder]] = [
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _AgentBuilder:
-    AGENT_ID:   str = ""
+    AGENT_ID: str = ""
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1) -> BookingLink:
         raise NotImplementedError
@@ -464,7 +735,7 @@ class SkyscannerBuilder(_AgentBuilder):
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
         dep = depart_date.replace("-", "")
         if return_date:
-            path = f"{from_airport}-{to_airport}/{dep}/{return_date.replace('-','')}"
+            path = f"{from_airport}-{to_airport}/{dep}/{return_date.replace('-', '')}"
         else:
             path = f"{from_airport}-{to_airport}/{dep}"
         return BookingLink(
@@ -490,7 +761,6 @@ class TripComBuilder(_AgentBuilder):
 
 
 class KayakBuilder(_AgentBuilder):
-    """TODO: 評估 Kayak 手續費後決定是否啟用。"""
     AGENT_ID = "kayak"
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
@@ -505,7 +775,6 @@ class KayakBuilder(_AgentBuilder):
 
 
 class KiwiBuilder(_AgentBuilder):
-    """TODO: 退票政策待確認後決定是否啟用。"""
     AGENT_ID = "kiwi"
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
@@ -533,51 +802,50 @@ class BookingLinkFactory:
     主要入口：給定一筆 FlightRecord，產生 BookingLinkSet。
 
     連結優先順序：
-      1. Google Flights（TFS 精確連結 或 generic 搜尋）
+      1. Google Flights（TFS 精確連結）— 永遠產生
       2. 航空公司官網（由航線參數組合）
       3. 代理商（由 AGENT_PRIORITY 控制，預設全停用）
 
+    未來擴充：
+      Playwright 批次擷取可在 reporter.export_csv() 前呼叫
+      airline_booking_urls.enrich_booking_urls()，將結果存入
+      record.booking_url，此工廠不需改動。
+
     使用範例：
-      links = BookingLinkFactory.from_record(record)
-      for link in links.all_links:
+      link_set = BookingLinkFactory.from_record(record)
+      for link in link_set.all_links:
           print(link)
     """
 
     @classmethod
-    def from_record(cls, record, adults: int = 1) -> BookingLinkSet:
-        """從 FlightRecord 建立 BookingLinkSet。"""
+    def from_record(cls, record: "FlightRecord", adults: int = 1) -> BookingLinkSet:
         link_set = BookingLinkSet()
 
         # ── 1. Google Flights 連結（永遠建立）─────────────────────────────
-        link_set.google_link = _build_google_flights_link(
-            from_airport=record.departure_airport,
-            to_airport=record.arrival_airport,
-            depart_date=record.departure_date,
-            return_date=record.return_date or "",
-            tfs_url=record.google_search_url or "",
-        )
+        link_set.google_link = _build_google_flights_link(record)
 
         # ── 2. 航空公司官網連結 ────────────────────────────────────────────
         airline_links: list[BookingLink] = []
-        # Handle combined names like "Scoot / Jetstar"
-        for name_part in record.airline.split("/"):
+        # Handle combined names like "Scoot / Jetstar" or "EVA Air / Peach"
+        for name_part in (record.airline or "").split("/"):
             name_part = name_part.strip()
             if not name_part:
                 continue
             for builder_cls in _ALL_AIRLINE_BUILDERS:
                 if builder_cls.matches(name_part):
-                    link = builder_cls.build(
-                        from_airport=record.departure_airport,
-                        to_airport=record.arrival_airport,
-                        depart_date=record.departure_date,
-                        return_date=record.return_date or "",
-                        adults=adults,
-                    )
-                    if link:
-                        # Avoid duplicate URLs
-                        if link.url not in {l.url for l in airline_links}:
+                    try:
+                        link = builder_cls.build(
+                            from_airport=record.departure_airport,
+                            to_airport=record.arrival_airport,
+                            depart_date=record.departure_date,
+                            return_date=record.return_date if record.is_roundtrip else "",
+                            adults=adults,
+                        )
+                        if link and link.url not in {l.url for l in airline_links}:
                             airline_links.append(link)
-                    break  # Only match first airline builder per name part
+                    except Exception as e:
+                        logger.debug(f"Builder {builder_cls.__name__} failed: {e}")
+                    break  # Only first matching builder per name part
             if len(airline_links) >= MAX_AIRLINE_LINKS:
                 break
         link_set.airline_links = airline_links
@@ -588,16 +856,19 @@ class BookingLinkFactory:
             builder_cls = _AGENT_BUILDER_MAP.get(agent_id)
             if not builder_cls:
                 continue
-            link = builder_cls.build(
-                from_airport=record.departure_airport,
-                to_airport=record.arrival_airport,
-                depart_date=record.departure_date,
-                return_date=record.return_date or "",
-                adults=adults,
-            )
-            if link:
-                link.priority = 30 + priority_idx
-                agent_links.append(link)
+            try:
+                link = builder_cls.build(
+                    from_airport=record.departure_airport,
+                    to_airport=record.arrival_airport,
+                    depart_date=record.departure_date,
+                    return_date=record.return_date if record.is_roundtrip else "",
+                    adults=adults,
+                )
+                if link:
+                    link.priority = 30 + priority_idx
+                    agent_links.append(link)
+            except Exception as e:
+                logger.debug(f"Agent builder {agent_id} failed: {e}")
             if len(agent_links) >= MAX_AGENT_LINKS:
                 break
         link_set.agent_links = agent_links
@@ -611,17 +882,15 @@ class BookingLinkFactory:
 
 def format_links_rich(link_set: BookingLinkSet) -> str:
     """
-    回傳 Rich 格式字串供表格顯示。
-    
-    不使用 [link=URL] markup（URL 內的 %, &, = 等字元會導致 Rich MarkupError）。
-    改為顯示標籤名稱，完整 URL 在 CSV 匯出中保留。
+    回傳 Rich 格式字串供表格欄位顯示（只顯示標籤，不嵌入 URL）。
+    URL 含特殊字元（&、=、%）會導致 Rich MarkupError，所以不嵌超連結。
+    完整 URL 在表格下方的「訂票連結」區塊另行列印。
     """
     if not link_set.has_links():
         return "[dim]—[/dim]"
     lines = []
     for link in link_set.all_links:
         if link.is_google_flights:
-            # Show icon + label only; URL too long for table cell
             lines.append(f"[bold cyan]🔍 {link.label}[/bold cyan]")
         elif link.is_direct:
             lines.append(f"[green]✈  {link.label}[/green]")
@@ -631,14 +900,9 @@ def format_links_rich(link_set: BookingLinkSet) -> str:
 
 
 def format_links_plain(link_set: BookingLinkSet) -> list[str]:
-    """回傳純文字連結清單（含完整 URL）。"""
+    """回傳純文字連結清單（含完整 URL），供 plain text 模式或表格下方列印。"""
     if not link_set.has_links():
         return []
-    prefix_map = {
-        "google": "🔍",
-        "direct": "✈ ",
-        "agent":  "🔗",
-    }
     result = []
     for link in link_set.all_links:
         if link.is_google_flights:

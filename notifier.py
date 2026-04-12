@@ -1,7 +1,7 @@
 """
 notifier.py — 低價通知模組
 ===========================
-支援三種通知管道（依 .env 設定自動啟用）：
+支援三種通知管道（依 config 設定自動啟用，全部選填）：
   1. LINE Notify
   2. Telegram Bot
   3. Email (SMTP)
@@ -9,6 +9,10 @@ notifier.py — 低價通知模組
 使用方式：
     from notifier import notify_cheap_flights
     notify_cheap_flights(cheap_records)
+
+通知管道設定方式（任一皆可）：
+  a) 設定環境變數（建議用於生產環境）
+  b) 直接在 config.py 填入對應變數
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from config import (
     SMTP_PASSWORD,
     ALERT_EMAIL_TO,
     PRICE_ALERT_THRESHOLD_TWD,
-    DISPLAY_CURRENCY,
+    TWD_FALLBACK_RATES,
 )
 from database import FlightRecord
 
@@ -66,8 +70,7 @@ def notify_cheap_flights(records: List[FlightRecord]) -> None:
 
 def _to_twd(record: FlightRecord) -> float:
     """將票價換算為 TWD（若已是 TWD 直接回傳）。"""
-    from config import TWD_FALLBACK_RATES
-    if record.currency == "TWD":
+    if record.currency.upper() == "TWD":
         return record.price
     rate = TWD_FALLBACK_RATES.get(record.currency.upper(), 1.0)
     return record.price * rate
@@ -78,11 +81,11 @@ def _build_message(records: List[FlightRecord]) -> str:
         f"✈️ Flyaway 低價通知（閾值 {PRICE_ALERT_THRESHOLD_TWD:,.0f} TWD）",
         "─" * 40,
     ]
-    for r in records[:10]:  # 最多顯示 10 筆避免訊息過長
-        twd = int(_to_twd(r))
-        rt_tag = "來回" if getattr(r, "is_roundtrip", False) else "單程"
-        dep = r.departure_time or "—"
-        arr = r.arrival_time or "—"
+    for r in records[:10]:  # 最多顯示 10 筆，避免訊息過長
+        twd    = int(_to_twd(r))
+        rt_tag = "來回" if r.is_roundtrip else "單程"
+        dep    = r.departure_time or "—"
+        arr    = r.arrival_time   or "—"
         lines.append(
             f"• {r.departure_airport}→{r.arrival_airport}  "
             f"{r.departure_date}  {dep}-{arr}\n"
@@ -124,7 +127,7 @@ def _send_telegram(message: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         resp = requests.post(
             url,
             json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
@@ -146,10 +149,10 @@ def _send_email(message: str) -> None:
     if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD, ALERT_EMAIL_TO]):
         return
     try:
-        msg = MIMEText(message, "plain", "utf-8")
-        msg["Subject"] = f"✈️ Flyaway 低價通知"
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_EMAIL_TO
+        msg            = MIMEText(message, "plain", "utf-8")
+        msg["Subject"] = "✈️ Flyaway 低價通知"
+        msg["From"]    = SMTP_USER
+        msg["To"]      = ALERT_EMAIL_TO
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.ehlo()

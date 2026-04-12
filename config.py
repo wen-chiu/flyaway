@@ -3,6 +3,7 @@ config.py — 全域設定檔
 =========================
 所有可調整參數集中於此。
 """
+import os
 from pathlib import Path
 
 # ── 路徑 ──────────────────────────────────────────────────────────────────────
@@ -10,63 +11,73 @@ BASE_DIR = Path(__file__).parent
 
 # ── 出發機場 ───────────────────────────────────────────────────────────────────
 DEPARTURE_AIRPORTS = ["TPE", "TSA"]
-DEFAULT_DEPARTURE = "TPE"
+DEFAULT_DEPARTURE  = "TPE"
 
 # ── 目的地清單（依地區分組）───────────────────────────────────────────────────
 WORLD_DESTINATIONS: dict[str, list[str]] = {
-    "Japan":    [ "NRT", "HND", "KIX", "NGO", "CTS", "FUK",
-                  "HKD", "AKJ", "SDJ", "HNA", "AXT", "FKS", "KMQ", 
-                  "HSG", "KMJ", "KOJ", "OKJ", "TAK", "HIJ", "KCZ",
-                  "OKA", "MYJ", "OIT", "UKB", "IBR"],
-    "東北亞 NE Asia": ["NRT", "HND", "KIX", "NGO", "CTS", "FUK", "ICN"],
-    "東南亞 SE Asia":    ["BKK", "DMK", "SIN", "KUL", "MNL", "CGK",
-                          "DPS", "HAN", "SGN", "RGN", "REP", "PNH",
-                          "VTE", "MDL"],
-    "歐洲 Europe":       ["LHR", "CDG", "FRA", "AMS", "MAD", "FCO",
-                          "BCN", "VIE", "ZRH", "IST", "PRG", "WAW",
-                          "ARN", "CPH", "HEL", "ATH", "LIS", "DUB"],
-    "北美 N America":    ["JFK", "LAX", "SFO", "ORD", "YVR", "YYZ",
-                          "SEA", "DFW", "MIA", "BOS"],
-    "大洋洲 Oceania":    ["SYD", "MEL", "AKL", "BNE", "PER"],
+    "Japan": [
+        "NRT", "HND", "KIX", "NGO", "CTS", "FUK",
+        "HKD", "AKJ", "SDJ", "HNA", "AXT", "FKS", "KMQ",
+        "HSG", "KMJ", "KOJ", "OKJ", "TAK", "HIJ", "KCZ",
+        "OKA", "MYJ", "OIT", "UKB", "IBR",
+    ],
+    "東北亞 NE Asia": ["GMP", "ICN", "PUS", "CJU", "TAE", "CJJ", "HKG", "MFM"],
+    "東南亞 SE Asia": [
+        "BKK", "DMK", "SIN", "KUL", "MNL", "CGK",
+        "DPS", "HAN", "SGN", "RGN", "REP", "PNH",
+        "VTE", "MDL", "CNX", "PQC", "DAD", "PEN", "CEB",
+    ],
+    "歐洲 Europe": [
+        "LHR", "CDG", "FRA", "AMS", "MAD", "FCO",
+        "BCN", "VIE", "ZRH", "IST", "PRG", "WAW",
+        "ARN", "CPH", "HEL", "ATH", "LIS", "DUB",
+    ],
+    "北美 N America": [
+        "JFK", "LAX", "SFO", "ORD", "YVR", "YYZ",
+        "SEA", "DFW", "MIA", "BOS",
+    ],
+    "大洋洲 Oceania": ["SYD", "MEL", "AKL", "BNE", "PER"],
     # "南亞 S Asia":       ["DEL", "BOM", "MAA", "BLR", "CMB", "KTM", "DAC"],
     # "中東 Middle East":  ["DXB", "DOH", "AUH", "RUH", "KWI", "AMM", "BEY"],
     # "非洲 Africa":       ["NBO", "JNB", "CAI", "CMN", "ADD"],
     # "南美 S America":    ["GRU", "EZE", "BOG", "LIM", "SCL"],
 }
 
-ALL_DESTINATIONS: list[str] = list(dict.fromkeys(  # deduplicate while preserving order
+ALL_DESTINATIONS: list[str] = list(dict.fromkeys(
     code for codes in WORLD_DESTINATIONS.values() for code in codes
 ))
 
-# ── 亞洲地區（短途/假期模式用）────────────────────────────────────────────────
+# ── 亞洲地區（短途 / Vacation Mode 用）────────────────────────────────────────
 ASIA_REGIONS: set[str] = {
-    "Japan", "東北亞 NE Asia", "東南亞 SE Asia", "南亞 S Asia", "中東 Middle East"
+    "Japan", "東北亞 NE Asia", "東南亞 SE Asia", "南亞 S Asia", "中東 Middle East",
 }
 ASIA_DESTINATIONS: list[str] = list(dict.fromkeys(
-    code for region, codes in WORLD_DESTINATIONS.items()
-    if region in ASIA_REGIONS for code in codes
+    code
+    for region, codes in WORLD_DESTINATIONS.items()
+    if region in ASIA_REGIONS
+    for code in codes
 ))
 
-# 亞洲以外（長途/假期模式用）
 NON_ASIA_REGIONS: set[str] = {
-    "歐洲 Europe", "北美 N America", "大洋洲 Oceania", "非洲 Africa", "南美 S America"
+    "歐洲 Europe", "北美 N America", "大洋洲 Oceania", "非洲 Africa", "南美 S America",
 }
 NON_ASIA_DESTINATIONS: list[str] = list(dict.fromkeys(
-    code for region, codes in WORLD_DESTINATIONS.items()
-    if region in NON_ASIA_REGIONS for code in codes
+    code
+    for region, codes in WORLD_DESTINATIONS.items()
+    if region in NON_ASIA_REGIONS
+    for code in codes
 ))
 
 # ── 航點轉機規則 ───────────────────────────────────────────────────────────────
-# 東北亞 & 東南亞的「主要機場」→ 只接受直達
-# Japan 群組包含許多小機場（需轉機），不全部強制直達
+# Japan / 東北亞 / 東南亞 → 直達 (0 stops)
 NONSTOP_ONLY_REGIONS: set[str] = {"Japan", "東北亞 NE Asia", "東南亞 SE Asia"}
 INTERCONTINENTAL_REGIONS: set[str] = {
-    "歐洲 Europe", "北美 N America", "大洋洲 Oceania", "非洲 Africa", "南美 S America"
+    "歐洲 Europe", "北美 N America", "大洋洲 Oceania", "非洲 Africa", "南美 S America",
 }
 
 # ── 自訂最愛目的地 ─────────────────────────────────────────────────────────────
 MY_DESTINATIONS: list[str] = [
-    "NRT", "KIX",       # 日本
+    "NRT", "KIX",        # 日本
     "ICN",               # 韓國
     "BKK", "DPS",        # 東南亞
     "SIN",               # 新加坡
@@ -85,23 +96,26 @@ _AIRPORT_TO_REGION: dict[str, str] = {
     for code in codes
 }
 
+
 def get_region(airport: str) -> str:
     return _AIRPORT_TO_REGION.get(airport.upper(), "")
+
 
 def get_max_stops_for(airport: str, default_max: int = 2) -> int:
     """
     依目的地決定 max_stops：
-    - Japan / 東北亞 NE Asia / 東南亞 SE Asia → 0（直達）
+    - Japan / 東北亞 / 東南亞 → 0（直達）
     - 其他地區 → default_max
     """
-    code = airport.upper()
-    region = get_region(code)
+    region = get_region(airport.upper())
     if region in NONSTOP_ONLY_REGIONS:
         return 0
     return default_max
 
+
 def is_intercontinental(airport: str) -> bool:
     return get_region(airport) in INTERCONTINENTAL_REGIONS
+
 
 # ── 飛行限制 ───────────────────────────────────────────────────────────────────
 MAX_STOPS          = 2
@@ -109,10 +123,10 @@ MAX_DURATION_HOURS = 26
 DEFAULT_FLEX_DAYS  = 0
 
 # ── 旅行天數預設 ───────────────────────────────────────────────────────────────
-ASIA_DEFAULT_TRIP_DAYS   = 5
-INTER_DEFAULT_TRIP_DAYS  = 9
-INTER_TRIP_MIN_DAYS      = 8
-INTER_TRIP_MAX_DAYS      = 18
+ASIA_DEFAULT_TRIP_DAYS  = 5
+INTER_DEFAULT_TRIP_DAYS = 9
+INTER_TRIP_MIN_DAYS     = 8
+INTER_TRIP_MAX_DAYS     = 18
 
 # ── 搜尋旅客 ──────────────────────────────────────────────────────────────────
 ADULTS   = 1
@@ -124,8 +138,8 @@ SCHEDULE_TIME = "07:00"
 
 # ── 假期搜尋設定 ──────────────────────────────────────────────────────────────
 HOLIDAY_LOOKAHEAD_DAYS = 180
-MIN_TRIP_DAYS = 3
-MAX_TRIP_DAYS = 18
+MIN_TRIP_DAYS          = 3
+MAX_TRIP_DAYS          = 18
 
 # ── 資料庫 ────────────────────────────────────────────────────────────────────
 DB_PATH = BASE_DIR / "flights.db"
@@ -146,23 +160,22 @@ PLAYWRIGHT_TIMEOUT  = 30_000
 #  Vacation Mode 設定
 # ══════════════════════════════════════════════════════════════════════════════
 
-# 三種假期模式（固定天數為預設，可透過 --flex 開啟彈性）
 VACATION_MODES: dict[str, dict] = {
     "short": {
         "label":        "🏖️  短途假期",
-        "days":         5,          # 固定 5 天
-        "flex_days":    1,          # 彈性時：4–6 天
-        "weekends":     1,          # 需涵蓋至少 1 個完整週末
-        "max_stops":    0,          # 直達
-        "max_duration": 10,         # 單程飛行上限（小時）
-        "destinations": "asia",     # 亞洲目的地
-        "horizon":      180,        # 預設搜尋未來幾天
+        "days":         5,
+        "flex_days":    1,
+        "weekends":     1,
+        "max_stops":    0,          # 直達（強制）
+        "max_duration": 10,
+        "destinations": "asia",
+        "horizon":      180,
     },
     "long": {
         "label":        "✈️  長途假期",
-        "days":         9,          # 固定 9 天
-        "flex_days":    1,          # 彈性時：8–10 天
-        "weekends":     2,          # 需涵蓋至少 2 個完整週末
+        "days":         9,
+        "flex_days":    1,
+        "weekends":     2,
         "max_stops":    2,
         "max_duration": 26,
         "destinations": "non_asia",
@@ -170,9 +183,9 @@ VACATION_MODES: dict[str, dict] = {
     },
     "happy": {
         "label":        "🌍 快樂假期",
-        "days":         16,         # 固定 16 天
-        "flex_days":    2,          # 彈性時：14–18 天
-        "weekends":     3,          # 需涵蓋至少 3 個完整週末
+        "days":         16,
+        "flex_days":    2,
+        "weekends":     3,
         "max_stops":    2,
         "max_duration": 26,
         "destinations": "non_asia",
@@ -180,7 +193,39 @@ VACATION_MODES: dict[str, dict] = {
     },
 }
 
-VACATION_REQUIRE_TW_HOLIDAY = False  # True = 必含台灣假日
-VACATION_TOP_WINDOWS        = 6      # 最多搜尋幾個時間窗口
-VACATION_TOP_DEST           = 25     # 每窗口搜尋幾個目的地
-VACATION_TOP_RESULTS        = 10     # 每窗口顯示幾筆
+VACATION_REQUIRE_TW_HOLIDAY = False
+VACATION_TOP_WINDOWS        = 6
+VACATION_TOP_DEST           = 25
+VACATION_TOP_RESULTS        = 10
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  通知設定（選填 — 設定環境變數或直接填入下方字串）
+#  支援 LINE Notify、Telegram Bot、Email (SMTP)
+# ══════════════════════════════════════════════════════════════════════════════
+
+LINE_NOTIFY_TOKEN  = os.getenv("LINE_NOTIFY_TOKEN",  "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
+
+SMTP_HOST     = os.getenv("SMTP_HOST",     "smtp.gmail.com")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER     = os.getenv("SMTP_USER",     "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
+
+# 低於此金額（TWD）才發出通知
+PRICE_ALERT_THRESHOLD_TWD = int(os.getenv("PRICE_ALERT_THRESHOLD_TWD", "15000"))
+
+# 報告顯示幣別（不影響搜尋，僅影響通知訊息格式）
+DISPLAY_CURRENCY = os.getenv("DISPLAY_CURRENCY", "TWD")
+
+# 匯率對照表（用於通知模組將非 TWD 票價換算顯示，非精確值僅供參考）
+TWD_FALLBACK_RATES: dict[str, float] = {
+    "TWD": 1.0,
+    "USD": 32.5,  "EUR": 35.0,  "GBP": 41.0,
+    "JPY": 0.22,  "KRW": 0.025, "HKD": 4.1,
+    "SGD": 24.0,  "MYR": 7.2,   "THB": 0.91,
+    "AUD": 21.5,  "NZD": 19.5,  "CAD": 24.0,
+    "CNY": 4.5,   "INR": 0.39,  "AED": 8.8,
+    "QAR": 8.9,
+}
