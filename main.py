@@ -309,17 +309,30 @@ def cmd_search(args: argparse.Namespace) -> None:
         elif dest_up in ("MY", "MINE"):
             from config import MY_DESTINATIONS
             destinations = MY_DESTINATIONS
-        elif dest_arg in WORLD_DESTINATIONS:
-            destinations = WORLD_DESTINATIONS[dest_arg]
         else:
-            from config import FAVOURITE_GROUPS
-            matched = next((v for k, v in FAVOURITE_GROUPS.items() if dest_arg in k), None)
-            if matched:
-                destinations = matched
+            from config import resolve_destinations, FAVOURITE_GROUPS
+            resolved = resolve_destinations(dest_arg)
+            if resolved:
+                destinations = resolved
             else:
-                destinations = [c.strip().upper() for c in dest_arg.split(",")]
+                matched = next((v for k, v in FAVOURITE_GROUPS.items() if dest_arg in k), None)
+                if matched:
+                    destinations = matched
+                else:
+                    destinations = [c.strip().upper() for c in dest_arg.split(",")]
     else:
-        from config import MY_DESTINATIONS, FAVOURITE_GROUPS
+        from config import (
+            MY_DESTINATIONS, FAVOURITE_GROUPS,
+            COMPOSITE_REGIONS, REGION_ALIASES,
+        )
+
+        # 建立中文標籤 lookup (canonical → 中文)
+        _cn_labels: dict[str, str] = {}
+        for alias, canon in REGION_ALIASES.items():
+            # 只取純中文別名（不含空格的最短中文 alias）
+            if all('\u4e00' <= c <= '\u9fff' for c in alias):
+                if canon not in _cn_labels or len(alias) < len(_cn_labels[canon]):
+                    _cn_labels[canon] = alias
 
         menu_entries: list[tuple[str, list[str]]] = []
         if MY_DESTINATIONS:
@@ -328,8 +341,24 @@ def cmd_search(args: argparse.Namespace) -> None:
             if grp_codes:
                 menu_entries.append((grp_name, grp_codes))
         for region_name, region_codes in WORLD_DESTINATIONS.items():
+            cn = _cn_labels.get(region_name, "")
+            display = f"{cn} {region_name}" if cn else region_name
             nonstop_tag = "（僅直達）" if region_name in NONSTOP_ONLY_REGIONS else ""
-            menu_entries.append((f"{region_name}{nonstop_tag}", region_codes))
+            menu_entries.append((f"{display}{nonstop_tag}", region_codes))
+        # 組合地區
+        from config import COMPOSITE_ALIASES
+        _comp_cn: dict[str, str] = {}
+        for alias, ckey in COMPOSITE_ALIASES.items():
+            if all('\u4e00' <= ch <= '\u9fff' for ch in alias):
+                _comp_cn.setdefault(ckey, alias)
+        for comp_name, comp_keys in COMPOSITE_REGIONS.items():
+            cn = _comp_cn.get(comp_name, "")
+            display = f"{cn} {comp_name}" if cn else comp_name
+            codes = []
+            for rk in comp_keys:
+                codes.extend(WORLD_DESTINATIONS.get(rk, []))
+            codes = list(dict.fromkeys(codes))
+            menu_entries.append((f"{display}（組合）", codes))
         menu_entries.append(("全部 ALL", ALL_DESTINATIONS))
         menu_entries.append(("✏️ 自訂代碼", []))
 
@@ -661,7 +690,8 @@ def build_parser() -> argparse.ArgumentParser:
   python main.py search                                        # 互動式（全功能）
   python main.py search --dest NRT --outbound 2026-05-01 --return 2026-05-05
   python main.py search --dest ALL --use-holidays --flex 2 --twd
-  python main.py search --dest "歐洲 Europe" --outbound 2026-07-01 --flex 1
+  python main.py search --dest "歐洲" --outbound 2026-07-01 --flex 1
+  python main.py search --dest "東北亞" --outbound 2026-05-01    # 日本+韓國+港澳
   python main.py schedule --time 08:00 --run-now
   python main.py holidays --intercontinental
   python main.py debug-api --dest SIN

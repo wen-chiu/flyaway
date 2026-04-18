@@ -1,55 +1,97 @@
 """
-config.py — 全域設定檔
-=========================
-所有可調整參數集中於此。
+config.py — Global configuration
+=================================
+All tunable parameters are centralised here.
 """
 import os
 from pathlib import Path
 
-# ── 路徑 ──────────────────────────────────────────────────────────────────────
+# ── Paths ────────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
 
-# ── 出發機場 ───────────────────────────────────────────────────────────────────
+# ── Departure airports ───────────────────────────────────────────────────────
 DEPARTURE_AIRPORTS = ["TPE", "TSA"]
 DEFAULT_DEPARTURE  = "TPE"
 
-# ── 目的地清單（依地區分組）───────────────────────────────────────────────────
+# ── Destination list (grouped by region) ────────────────────────────────────
+# Each key is an atomic region name (canonical English key).
+# Chinese aliases and composite regions are defined below in REGION_ALIASES / COMPOSITE_REGIONS.
 WORLD_DESTINATIONS: dict[str, list[str]] = {
     "Japan": [
-        "NRT", "HND", "KIX", "NGO", "CTS", "FUK",
-        "HKD", "AKJ", "SDJ", "HNA", "AXT", "FKS", "KMQ",
+        # ✈ Nonstop from TPE
+        "NRT", "HND", "KIX", "NGO", "CTS", "FUK", "OKA",
+        "HKD", "AKJ", "AOJ", "SDJ", "HNA", "AXT", "FKS", "KMQ",
         "HSG", "KMJ", "KOJ", "OKJ", "TAK", "HIJ", "KCZ",
-        "OKA", "MYJ", "OIT", "UKB", "IBR",
+        "MYJ", "OIT", "UKB", "IBR", "KKJ", "ISG", "YGJ", "SHI",
     ],
-    "Korea": ["GMP", "ICN", "PUS", "CJU", "TAE", "CJJ", "HKG", "MFM"],
-    "東南亞 SE Asia": [
-        "BKK", "DMK", "SIN", "KUL", "CGK", # "MNL",
-        "DPS", "HAN", "SGN", "RGN", "REP", "PNH",
-        "VTE", "MDL", "CNX", "PQC", "DAD", "PEN", "CEB",
+    "Korea": [
+        "ICN", "GMP", "PUS", "CJU", "TAE", "CJJ", "MWX",
     ],
-    "歐洲 Europe": [
-        "LHR", "CDG", "FRA", "AMS", "MAD", "FCO",
-        "BCN", "VIE", "ZRH", "IST", "PRG", "WAW",
-        "ARN", "CPH", "HEL", "ATH", "LIS", "DUB",
+    "SE Asia": [
+        "BKK", "DMK", "SIN", "KUL", "CGK", "MNL", "CRK",
+        "DPS", "HAN", "SGN", "DAD", "NHA", "CEB",
+        "CNX", "PQC", "PEN", "BKI", "BWN",
+        "RGN", "MDL", "REP", "PNH", "VTE",
     ],
-    "北美 N America": [
-        "JFK", "LAX", "SFO", "ORD", "YVR", "YYZ",
-        "SEA", "DFW", "MIA", "BOS",
+    "Europe": [
+        "AMS", "FRA", "LHR", "VIE", "IST", "PRG",
+        "CDG", "FCO", "BCN", "MAD", "ZRH", "MUC", "BER",
+        "WAW", "ARN", "CPH", "HEL", "ATH", "LIS", "DUB",
     ],
-    "大洋洲 Oceania": ["SYD", "MEL", "AKL", "BNE", "PER"],
-    # "南亞 S Asia":       ["DEL", "BOM", "MAA", "BLR", "CMB", "KTM", "DAC"],
-    # "中東 Middle East":  ["DXB", "DOH", "AUH", "RUH", "KWI", "AMM", "BEY"],
-    # "非洲 Africa":       ["NBO", "JNB", "CAI", "CMN", "ADD"],
-    # "南美 S America":    ["GRU", "EZE", "BOG", "LIM", "SCL"],
+    "N America": [
+        "SFO", "LAX", "SEA", "JFK", "ORD", "DFW",
+        "PHX", "ONT", "GUM",
+        "YVR", "YYZ",
+        "BOS", "MIA", "IAD",
+    ],
+    "Oceania": [
+        "SYD", "MEL", "BNE", "AKL", "PER",
+    ],
+    # "S Asia":       ["DEL", "BOM", "MAA", "BLR", "CMB", "KTM", "DAC"],
+    # "Middle East":  ["DXB", "AUH", "DOH", "RUH", "KWI", "AMM", "BEY"],
+    # "Africa":       ["NBO", "JNB", "CAI", "CMN", "ADD"],
+    # "S America":    ["GRU", "EZE", "BOG", "LIM", "SCL"],
 }
 
 ALL_DESTINATIONS: list[str] = list(dict.fromkeys(
     code for codes in WORLD_DESTINATIONS.values() for code in codes
 ))
 
-# ── 亞洲地區（短途 / Vacation Mode 用）────────────────────────────────────────
+# ── Bilingual aliases → canonical key ───────────────────────────────────────
+# Users can type Mandarin or English; automatically maps to a WORLD_DESTINATIONS key.
+REGION_ALIASES: dict[str, str] = {
+    # Mandarin
+    "日本":   "Japan",
+    "韓國":   "Korea",
+    "東南亞": "SE Asia",
+    "歐洲":   "Europe",
+    "北美":   "N America",
+    "大洋洲": "Oceania",
+    # English variants
+    "Southeast Asia": "SE Asia",
+    "North America":  "N America",
+    # Legacy keys (backward compatibility with old --dest arguments)
+    "東南亞 SE Asia": "SE Asia",
+    "歐洲 Europe":    "Europe",
+    "北美 N America": "N America",
+    "大洋洲 Oceania": "Oceania",
+}
+
+# ── Composite regions (semantic groups spanning multiple atomic regions) ──────
+COMPOSITE_REGIONS: dict[str, list[str]] = {
+    "NE Asia":   ["Japan", "Korea"],
+    "East Asia": ["Japan", "Korea", "SE Asia"],
+}
+COMPOSITE_ALIASES: dict[str, str] = {
+    "東北亞":         "NE Asia",
+    "Northeast Asia": "NE Asia",
+    "東亞":           "East Asia",
+}
+
+# ── Asia regions (short-haul / Vacation Mode) ───────────────────────────────
 ASIA_REGIONS: set[str] = {
-    "Japan", "東北亞 NE Asia", "東南亞 SE Asia", "南亞 S Asia", "中東 Middle East",
+    "Japan", "Korea", "SE Asia",
+    # "S Asia", "Middle East",
 }
 ASIA_DESTINATIONS: list[str] = list(dict.fromkeys(
     code
@@ -58,8 +100,10 @@ ASIA_DESTINATIONS: list[str] = list(dict.fromkeys(
     for code in codes
 ))
 
+# ── Non-Asia regions (intercontinental / Vacation Mode) ─────────────────────
 NON_ASIA_REGIONS: set[str] = {
-    "歐洲 Europe", "北美 N America", "大洋洲 Oceania", "非洲 Africa", "南美 S America",
+    "Europe", "N America", "Oceania",
+    # "Africa", "S America",
 }
 NON_ASIA_DESTINATIONS: list[str] = list(dict.fromkeys(
     code
@@ -68,27 +112,35 @@ NON_ASIA_DESTINATIONS: list[str] = list(dict.fromkeys(
     for code in codes
 ))
 
-# ── 航點轉機規則 ───────────────────────────────────────────────────────────────
-# Japan / 東北亞 / 東南亞 → 直達 (0 stops)
-NONSTOP_ONLY_REGIONS: set[str] = {"Japan", "東北亞 NE Asia", "東南亞 SE Asia"}
+# ── Transfer rules ───────────────────────────────────────────────────────────
+# Short-haul Asia → nonstop only (0 stops)
+NONSTOP_ONLY_REGIONS: set[str] = {"Japan", "Korea", "SE Asia"}
 INTERCONTINENTAL_REGIONS: set[str] = {
-    "歐洲 Europe", "北美 N America", "大洋洲 Oceania", "非洲 Africa", "南美 S America",
+    "Europe", "N America", "Oceania",
+    # "Africa", "S America",
 }
 
-# ── 自訂最愛目的地 ─────────────────────────────────────────────────────────────
+# ── Personal favourite destinations ──────────────────────────────────────────
 MY_DESTINATIONS: list[str] = [
-    "NRT", "KIX",        # 日本
-    "ICN",               # 韓國
-    "BKK", "DPS",        # 東南亞
-    "SIN",               # 新加坡
-    "LHR", "CDG",        # 歐洲
-    "LAX", "SFO",        # 北美
+    "NRT", "KIX",        # Japan
+    "ICN",               # Korea
+    "BKK", "DPS",        # SE Asia
+    "SIN",               # Singapore
+    "LHR", "CDG",        # Europe
+    "LAX", "SFO",        # N America
 ]
 
 FAVOURITE_GROUPS: dict[str, list[str]] = {
-    # "🏖️  度假首選": ["DPS", "BKK", "SIN", "NRT", "KIX"],
-    # "🗺️  長途探索": ["LHR", "CDG", "LAX", "SYD"],
+    # "🏖️  Holiday picks": ["DPS", "BKK", "SIN", "NRT", "KIX"],
+    # "🗺️  Long-haul": ["LHR", "CDG", "LAX", "SYD"],
 }
+
+# ── User-defined destinations (airports outside any region, freely added) ─────
+USER_DESTINATIONS: list[str] = [
+    # Add any airport codes you want to track that are not covered above, e.g.:
+    # "KTM",  # Kathmandu
+    # "DXB",  # Dubai
+]
 
 _AIRPORT_TO_REGION: dict[str, str] = {
     code: region
@@ -101,11 +153,43 @@ def get_region(airport: str) -> str:
     return _AIRPORT_TO_REGION.get(airport.upper(), "")
 
 
+def resolve_destinations(name: str) -> list[str] | None:
+    """
+    Unified destination name resolver.
+    1. WORLD_DESTINATIONS canonical key (e.g. "Japan")
+    2. REGION_ALIASES (e.g. "歐洲" → all Europe airports)
+    3. COMPOSITE_REGIONS / COMPOSITE_ALIASES (e.g. "東北亞" → Japan + Korea)
+    Returns a list of airport codes, or None if not found.
+    """
+    # 1. 直接 key
+    if name in WORLD_DESTINATIONS:
+        return list(WORLD_DESTINATIONS[name])
+    # 2. alias → atomic region
+    canonical = REGION_ALIASES.get(name)
+    if canonical and canonical in WORLD_DESTINATIONS:
+        return list(WORLD_DESTINATIONS[canonical])
+    # 3. composite key
+    if name in COMPOSITE_REGIONS:
+        return _expand_composite(name)
+    # 4. composite alias
+    comp_key = COMPOSITE_ALIASES.get(name)
+    if comp_key and comp_key in COMPOSITE_REGIONS:
+        return _expand_composite(comp_key)
+    return None
+
+
+def _expand_composite(comp_key: str) -> list[str]:
+    codes: list[str] = []
+    for region_key in COMPOSITE_REGIONS[comp_key]:
+        codes.extend(WORLD_DESTINATIONS.get(region_key, []))
+    return list(dict.fromkeys(codes))
+
+
 def get_max_stops_for(airport: str, default_max: int = 2) -> int:
     """
-    依目的地決定 max_stops：
-    - Japan / 東北亞 / 東南亞 → 0（直達）
-    - 其他地區 → default_max
+    Determine max_stops for a destination:
+    - Short-haul Asia regions → 0 (nonstop only)
+    - All other regions → default_max
     """
     region = get_region(airport.upper())
     if region in NONSTOP_ONLY_REGIONS:
@@ -117,62 +201,62 @@ def is_intercontinental(airport: str) -> bool:
     return get_region(airport) in INTERCONTINENTAL_REGIONS
 
 
-# ── 飛行限制 ───────────────────────────────────────────────────────────────────
+# ── Flight constraints ───────────────────────────────────────────────────────
 MAX_STOPS          = 2
 MAX_DURATION_HOURS = 26
 DEFAULT_FLEX_DAYS  = 0
 
-# ── 旅行天數預設 ───────────────────────────────────────────────────────────────
+# ── Default trip lengths ─────────────────────────────────────────────────────
 ASIA_DEFAULT_TRIP_DAYS  = 5
 INTER_DEFAULT_TRIP_DAYS = 9
 INTER_TRIP_MIN_DAYS     = 8
 INTER_TRIP_MAX_DAYS     = 18
 
-# ── 搜尋旅客 ──────────────────────────────────────────────────────────────────
+# ── Search passengers ────────────────────────────────────────────────────────
 ADULTS   = 1
 CHILDREN = 0
 INFANTS  = 0
 
-# ── 排程設定 ──────────────────────────────────────────────────────────────────
+# ── Scheduler ────────────────────────────────────────────────────────────────
 SCHEDULE_TIME = "07:00"
 
-# ── 假期搜尋設定 ──────────────────────────────────────────────────────────────
+# ── Holiday search settings ───────────────────────────────────────────────────
 HOLIDAY_LOOKAHEAD_DAYS = 180
 MIN_TRIP_DAYS          = 3
 MAX_TRIP_DAYS          = 18
 
-# ── 資料庫 ────────────────────────────────────────────────────────────────────
+# ── Database ─────────────────────────────────────────────────────────────────
 DB_PATH = BASE_DIR / "flights.db"
 
-# ── 輸出報告 ──────────────────────────────────────────────────────────────────
+# ── Reports ───────────────────────────────────────────────────────────────────
 REPORT_DIR    = BASE_DIR / "reports"
 TOP_N_RESULTS = 20
 
-# ── 請求速率控制 ──────────────────────────────────────────────────────────────
+# ── Request rate limiting ─────────────────────────────────────────────────────
 REQUEST_DELAY_SEC = 2.5
 MAX_RETRIES       = 3
 
-# ── Playwright 設定 ───────────────────────────────────────────────────────────
+# ── Playwright settings ───────────────────────────────────────────────────────
 PLAYWRIGHT_HEADLESS = True
 PLAYWRIGHT_TIMEOUT  = 30_000
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Vacation Mode 設定
+#  Vacation modes
 # ══════════════════════════════════════════════════════════════════════════════
 
 VACATION_MODES: dict[str, dict] = {
     "short": {
-        "label":        "🏖️  短途假期",
+        "label":        "🏖️  Short trip",
         "days":         5,
         "flex_days":    1,
         "weekends":     1,
-        "max_stops":    0,          # 直達（強制）
+        "max_stops":    0,          # nonstop only (forced)
         "max_duration": 10,
         "destinations": "asia",
         "horizon":      180,
     },
     "long": {
-        "label":        "✈️  長途假期",
+        "label":        "✈️  Long-haul trip",
         "days":         9,
         "flex_days":    1,
         "weekends":     2,
@@ -182,7 +266,7 @@ VACATION_MODES: dict[str, dict] = {
         "horizon":      365,
     },
     "happy": {
-        "label":        "🌍 快樂假期",
+        "label":        "🌍 Happy holiday",
         "days":         16,
         "flex_days":    2,
         "weekends":     3,
@@ -199,8 +283,8 @@ VACATION_TOP_DEST           = 25
 VACATION_TOP_RESULTS        = 10
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  通知設定（選填 — 設定環境變數或直接填入下方字串）
-#  支援 LINE Notify、Telegram Bot、Email (SMTP)
+#  Notification settings (optional — set env vars or fill in strings below)
+#  Supports LINE Notify, Telegram Bot, Email (SMTP)
 # ══════════════════════════════════════════════════════════════════════════════
 
 LINE_NOTIFY_TOKEN  = os.getenv("LINE_NOTIFY_TOKEN",  "")
@@ -213,13 +297,13 @@ SMTP_USER     = os.getenv("SMTP_USER",     "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
 
-# 低於此金額（TWD）才發出通知
+# Send notification only when price is below this threshold (TWD)
 PRICE_ALERT_THRESHOLD_TWD = int(os.getenv("PRICE_ALERT_THRESHOLD_TWD", "15000"))
 
-# 報告顯示幣別（不影響搜尋，僅影響通知訊息格式）
+# Display currency for reports (does not affect search, only notification formatting)
 DISPLAY_CURRENCY = os.getenv("DISPLAY_CURRENCY", "TWD")
 
-# 匯率對照表（用於通知模組將非 TWD 票價換算顯示，非精確值僅供參考）
+# Fallback exchange rates for converting non-TWD prices in notifications (approximate)
 TWD_FALLBACK_RATES: dict[str, float] = {
     "TWD": 1.0,
     "USD": 32.5,  "EUR": 35.0,  "GBP": 41.0,
