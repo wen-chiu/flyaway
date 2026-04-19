@@ -4,7 +4,10 @@ main.py — 台北機票比價系統 主程式
 使用方式：
   python main.py search                  # 互動式搜尋（含來回、彈性日期）
   python main.py search --dest NRT --outbound 2026-05-01 --return 2026-05-06
+  python main.py search --dest NRT --outbound 2026-05-01 --return 5 --twd --yes
   python main.py search --dest ALL --use-holidays --flex 2
+  python main.py vacation --mode short   # Vacation Mode 假期模式
+  python main.py vacation --mode happy --export-csv
   python main.py schedule --time 07:00
   python main.py holidays
   python main.py debug-api --dest NRT
@@ -199,7 +202,7 @@ def ask_trip_dates(
 
     elif outbound_arg:
         outbound_dates = [date.fromisoformat(d.strip()) for d in outbound_arg.split(",")]
-        return_dates_raw = None
+        return_dates_raw = None  # noqa: will be checked below
     else:
         _print("\n[bold]📅 出發日期設定[/bold]" if _HAS_RICH else "\n📅 出發日期設定")
         raw = _ask("出發日期（YYYY-MM-DD，多個用逗號，留空=未來常用節點）", "")
@@ -214,8 +217,13 @@ def ask_trip_dates(
     return_dates: List[date] = []
 
     if return_arg:
-        return_dates = [date.fromisoformat(d.strip()) for d in return_arg.split(",")]
-    elif use_holidays and "return_dates_raw" in dir() and return_dates_raw:
+        # Support both date strings and trip-day integers from CLI (e.g. --return 5)
+        if return_arg.strip().isdigit():
+            trip_days = int(return_arg.strip())
+            return_dates = [d + timedelta(days=trip_days - 1) for d in outbound_dates]
+        else:
+            return_dates = [date.fromisoformat(d.strip()) for d in return_arg.split(",")]
+    elif use_holidays and return_dates_raw is not None:
         return_dates = return_dates_raw  # type: ignore[assignment]
     else:
         _print("\n[bold]🔙 回程日期設定[/bold]" if _HAS_RICH else "\n🔙 回程日期設定")
