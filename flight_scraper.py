@@ -923,14 +923,10 @@ def _build_google_flights_url(
     date_str: str,
     adults: int = 1,
 ) -> str:
-    """產生 Google Flights 的直接搜尋 URL。"""
-    base = "https://www.google.com/travel/flights"
-    params = (
-        f"?q=Flights+from+{from_airport}+to+{to_airport}"
-        f"&hl=zh-TW"
-        f"&curr=TWD"
-    )
-    return base + params
+    """產生 Google Flights 的直接搜尋 URL（含出發日期）。"""
+    flt = f"{from_airport}.{to_airport}.{date_str}"
+    hash_frag = f"flt={flt};c:TWD;e:{adults};t:f"
+    return f"https://www.google.com/travel/flights?hl=zh-TW&curr=TWD#{hash_frag}"
 
 
 def build_date_range(

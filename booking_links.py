@@ -10,8 +10,8 @@ booking_links.py — 訂票連結產生器
 連結來源說明
 ------------
 Google Flights 連結：
-  使用 flight_scraper.build_booking_url() 產生 TFS 編碼 URL，
-  直接對應到該航線、日期的搜尋結果頁。
+  使用 #flt= hash 格式產生深層連結 URL，包含出發/回程日期、
+  機場、經停等完整資訊，直接對應到搜尋結果頁。
 
 航空公司官網連結：
   使用各航空公司的查詢參數 URL。由於各家公司可能更新 URL 結構，
@@ -115,34 +115,50 @@ class BookingLinkSet:
 #  Google Flights URL 建構
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _build_google_flights_url(
+    from_airport: str,
+    to_airport: str,
+    depart_date: str,
+    return_date: str = "",
+    adults: int = 1,
+    max_stops: int = -1,
+    currency: str = "TWD",
+) -> str:
+    """
+    Build a Google Flights deep link using the #flt= hash fragment format.
+
+    Format: #flt=ORIG.DEST.YYYY-MM-DD[*DEST.ORIG.YYYY-MM-DD];c:CUR;e:N;s:S[*S];t:f
+
+    This format has been stable since ~2018. Google Flights reads the hash
+    fragment client-side to populate the search form with exact parameters,
+    so the user sees flight results immediately without re-entering anything.
+    """
+    segments = [f"{from_airport}.{to_airport}.{depart_date}"]
+    if return_date:
+        segments.append(f"{to_airport}.{from_airport}.{return_date}")
+    flt = "*".join(segments)
+    opts = [f"c:{currency}", f"e:{adults}"]
+    if max_stops >= 0:
+        stops = str(max_stops)
+        opts.append(f"s:{stops}*{stops}" if return_date else f"s:{stops}")
+    opts.append("t:f")  # economy cabin
+    hash_frag = f"flt={flt};{';'.join(opts)}"
+    return f"https://www.google.com/travel/flights?hl=zh-TW&curr={currency}#{hash_frag}"
+
+
 def _build_google_flights_link(record: "FlightRecord") -> BookingLink:
     """
-    建立 Google Flights TFS 編碼連結。
-    使用 flight_scraper.build_booking_url() 產生精確的 TFS URL。
+    建立 Google Flights 深層連結。
+    使用 #flt= hash 格式，包含完整的出發/回程日期、機場、經停資訊。
+    使用者點擊後直接看到該航線的搜尋結果，無需重新輸入任何資訊。
     """
-    # Lazy import to avoid circular dependency (flight_scraper → booking_links would be circular)
-    try:
-        from flight_scraper import build_booking_url
-        url = build_booking_url(
-            from_airport=record.departure_airport,
-            to_airport=record.arrival_airport,
-            outbound_date=record.departure_date,
-            return_date=record.return_date if record.is_roundtrip else "",
-            max_stops=record.stops if record.stops >= 0 else 2,
-        )
-    except Exception as e:
-        logger.debug(f"build_booking_url failed: {e}, using generic URL")
-        dep = record.departure_airport
-        arr = record.arrival_airport
-        d   = record.departure_date
-        r   = record.return_date or ""
-        if r:
-            url = (f"https://www.google.com/travel/flights/search?"
-                   f"q=flights+from+{dep}+to+{arr}+{d}+return+{r}&hl=zh-TW")
-        else:
-            url = (f"https://www.google.com/travel/flights/search?"
-                   f"q=flights+from+{dep}+to+{arr}+{d}&hl=zh-TW")
-
+    url = _build_google_flights_url(
+        from_airport=record.departure_airport,
+        to_airport=record.arrival_airport,
+        depart_date=record.departure_date,
+        return_date=record.return_date if record.is_roundtrip else "",
+        max_stops=record.stops if record.stops >= 0 else -1,
+    )
     return BookingLink(
         label="Google Flights 搜尋結果",
         url=url,
@@ -201,17 +217,19 @@ class ChinaAirlinesBuilder(_AirlineBuilder):
     KEYWORDS = ("china airlines", "china air", "中華航空", "中华航空")
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
-        params = {
-            "tripType": "RT" if return_date else "OW",
-            "from": from_airport, "to": to_airport,
-            "departDate": depart_date.replace("-", "/"),
-            "adult": adults,
-        }
-        if return_date:
-            params["returnDate"] = return_date.replace("-", "/")
+        # CI 官網為 SPA，以下 URL 帶上參數供參考，實際可能需手動輸入
+        trip = "roundTrip" if return_date else "oneWay"
+        params = urlencode({
+            "tripType": trip,
+            "departureCity": from_airport,
+            "arrivalCity": to_airport,
+            "departureDate": depart_date,
+            **(({"returnDate": return_date}) if return_date else {}),
+            "adultCount": adults,
+        })
         return BookingLink(
             label="中華航空 China Airlines",
-            url=f"https://www.china-airlines.com/tw/zh/booking/book-tickets/search?{urlencode(params)}",
+            url=f"https://www.china-airlines.com/tw/zh?{params}",
             is_direct=True, priority=10,
         )
 
@@ -220,13 +238,14 @@ class StarluxBuilder(_AirlineBuilder):
     KEYWORDS = ("starlux", "星宇")
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
+        # Starlux 官網為 SPA，/booking 頁面正常但 deep link 參數可能被忽略
         trip = "RT" if return_date else "OW"
         ret  = f"&returnDate={return_date}" if return_date else ""
         return BookingLink(
             label="星宇航空 STARLUX",
-            url=(f"https://www.starlux-airlines.com/zh-TW/booking/flights"
+            url=(f"https://www.starlux-airlines.com/zh-TW/booking"
                  f"?tripType={trip}&origin={from_airport}&destination={to_airport}"
-                 f"&outbound={depart_date}{ret}&adt={adults}"),
+                 f"&departureDate={depart_date}{ret}&adt={adults}"),
             is_direct=True, priority=10,
         )
 
@@ -682,15 +701,15 @@ _ALL_AIRLINE_BUILDERS: list[type[_AirlineBuilder]] = [
     # 港澳
     CathayBuilder,
     HongKongExpressBuilder,
+    # 韓國（Asiana 必須在 ANA 之前，避免 "ana" 子字串誤匹配 "asiana"）
+    KoreanAirBuilder,
+    AsianaBuilder,
+    JejuAirBuilder,
     # 日本
     JalBuilder,
     AnaBuilder,
     PeachBuilder,
     JetstarBuilder,
-    # 韓國
-    KoreanAirBuilder,
-    AsianaBuilder,
-    JejuAirBuilder,
     # 東南亞 傳統
     SingaporeAirlinesBuilder,
     MalaysiaAirlinesBuilder,
@@ -733,14 +752,18 @@ class SkyscannerBuilder(_AgentBuilder):
     AGENT_ID = "skyscanner"
     @classmethod
     def build(cls, from_airport, to_airport, depart_date, return_date="", adults=1):
-        dep = depart_date.replace("-", "")
+        # Skyscanner 使用 lowercase IATA / YYMMDD 日期 / 分段路徑
+        orig = from_airport.lower()
+        dest = to_airport.lower()
+        dep  = depart_date.replace("-", "")[2:]   # YYYYMMDD → YYMMDD
         if return_date:
-            path = f"{from_airport}-{to_airport}/{dep}/{return_date.replace('-', '')}"
+            ret  = return_date.replace("-", "")[2:]
+            path = f"{orig}/{dest}/{dep}/{ret}"
         else:
-            path = f"{from_airport}-{to_airport}/{dep}"
+            path = f"{orig}/{dest}/{dep}"
         return BookingLink(
             label="Skyscanner",
-            url=f"https://www.skyscanner.com.tw/transport/flights/{path}?adults={adults}&cabinclass=economy",
+            url=f"https://www.skyscanner.com.tw/transport/flights/{path}/?adults={adults}&cabinclass=economy",
             priority=30,
         )
 
