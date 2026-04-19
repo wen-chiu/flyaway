@@ -299,8 +299,9 @@ def cmd_search(args: argparse.Namespace) -> None:
     from reporter import print_results, export_csv
 
     # ── 出發機場 ──────────────────────────────────────────────────────────────
+    auto_mode = getattr(args, "yes", False)
     from_airport = (getattr(args, "from_airport", None) or DEFAULT_DEPARTURE).upper()
-    if _HAS_RICH and not getattr(args, "from_airport", None):
+    if _HAS_RICH and not getattr(args, "from_airport", None) and not auto_mode:
         from_airport = Prompt.ask(
             "  出發機場代碼", default=DEFAULT_DEPARTURE,
             choices=["TPE", "TSA"], show_choices=True,
@@ -411,12 +412,17 @@ def cmd_search(args: argparse.Namespace) -> None:
         )
 
     # ── 日期 & 彈性設定 ───────────────────────────────────────────────────────
+    # In auto mode (--yes), default flex to 0 if not explicitly given
+    flex_value = getattr(args, "flex", None)
+    if flex_value is None and auto_mode:
+        flex_value = 0
+
     outbound_dates, return_dates, flex_days = ask_trip_dates(
         destinations=destinations,
         use_holidays=getattr(args, "use_holidays", False),
         outbound_arg=getattr(args, "outbound", None),
         return_arg=getattr(args, "ret", None),
-        flex_arg=getattr(args, "flex", None),
+        flex_arg=flex_value,
     )
 
     leave_summary = None
@@ -430,7 +436,9 @@ def cmd_search(args: argparse.Namespace) -> None:
 
     # ── 台幣計價 ──────────────────────────────────────────────────────────────
     show_twd = getattr(args, "twd", False)
-    if not getattr(args, "twd", None) and not getattr(args, "outbound", None):
+    if auto_mode:
+        show_twd = True
+    elif not getattr(args, "twd", None) and not getattr(args, "outbound", None):
         show_twd = _confirm("以台幣 (TWD) 顯示票價？", default=True)
 
     # ── 確認摘要 ──────────────────────────────────────────────────────────────
@@ -459,7 +467,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         t.add_row("顯示幣別",    "台幣 TWD" if show_twd else "原始幣別")
         console.print(t)
 
-        if not Confirm.ask("  確認開始搜尋？", default=True):
+        if not auto_mode and not Confirm.ask("  確認開始搜尋？", default=True):
             return
     else:
         print(f"\n出發機場: {from_airport} | 目的地: {len(destinations)} 個")
@@ -490,10 +498,11 @@ def cmd_search(args: argparse.Namespace) -> None:
     # All records should already be in TWD; this is a safety pass for any
     # edge cases (e.g. Playwright backend returning non-TWD).
     if show_twd:
-        from currency import to_twd
+        from config import TWD_FALLBACK_RATES
         for r in roundtrip_records:
             if r.currency != "TWD":
-                r.price = to_twd(r.price, r.currency)
+                rate = TWD_FALLBACK_RATES.get(r.currency.upper(), 1.0)
+                r.price = round(r.price * rate, 0)
                 r.currency = "TWD"
 
     # ── 儲存 & 輸出 ───────────────────────────────────────────────────────────
@@ -515,7 +524,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             else "提示：若目的地班表稀疏（如小型機場），可嘗試調整回程日期。"
         )
 
-    if roundtrip_records and (getattr(args, "export_csv", False) or _ask_export_csv()):
+    if roundtrip_records and (getattr(args, "export_csv", False) or (not auto_mode and _ask_export_csv())):
         export_csv(roundtrip_records, group_by_date=is_flex_search)
 
 
