@@ -489,6 +489,7 @@ def cmd_search(args: argparse.Namespace) -> None:
                 r.currency = "TWD"
 
     # ── 儲存 & 輸出 ───────────────────────────────────────────────────────────
+    is_flex_search = flex_days > 0
     if roundtrip_records:
         db.bulk_insert_flights(roundtrip_records)
         print_results(
@@ -496,6 +497,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             title=f"{from_airport} ⇄ {', '.join(destinations[:3])}{'...' if len(destinations) > 3 else ''} 來回票",
             top_n=getattr(args, "top_n", 20) or 20,
             split_lcc=True,
+            group_by_date=is_flex_search,
         )
     else:
         _print("⚠️ 沒有找到符合條件的來回票。")
@@ -506,7 +508,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         )
 
     if roundtrip_records and (getattr(args, "export_csv", False) or _ask_export_csv()):
-        export_csv(roundtrip_records)
+        export_csv(roundtrip_records, group_by_date=is_flex_search)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

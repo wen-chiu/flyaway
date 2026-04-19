@@ -235,24 +235,66 @@ def _print_by_date(
     top_n: int,
     split_lcc: bool,
 ) -> None:
-    """按出發日期分組，每組再分傳統/廉航顯示。"""
+    """
+    按出發日期分組，每組再分傳統/廉航顯示。
+    每個日期組有明顯的視覺分隔，並附帶最低價目的地摘要。
+    """
     by_date: Dict[str, List[FlightRecord]] = defaultdict(list)
     for r in records:
         by_date[r.departure_date].append(r)
 
-    for dep_date in sorted(by_date.keys()):
+    sorted_dates = sorted(by_date.keys())
+
+    for date_idx, dep_date in enumerate(sorted_dates):
         group = sorted(by_date[dep_date], key=lambda r: r.price)
+
+        # ── Date header panel ─────────────────────────────────────────────
+        if _HAS_RICH:
+            # Build cheapest-per-destination summary for this date
+            cheapest_by_dest: Dict[str, FlightRecord] = {}
+            for r in group:
+                key = r.arrival_airport
+                if key not in cheapest_by_dest or r.price < cheapest_by_dest[key].price:
+                    cheapest_by_dest[key] = r
+            dest_summary_parts = []
+            for r in sorted(cheapest_by_dest.values(), key=lambda x: x.price)[:6]:
+                dest_summary_parts.append(
+                    f"{dest_label(r.arrival_airport)} {format_price(r.price, r.currency)}"
+                )
+            dest_summary = "  |  ".join(dest_summary_parts)
+            if len(cheapest_by_dest) > 6:
+                dest_summary += f"  … 共 {len(cheapest_by_dest)} 個目的地"
+
+            traditional_count = sum(1 for r in group if r.airline_type == "traditional")
+            lcc_count = sum(1 for r in group if r.airline_type == "LCC")
+            count_str = f"傳統 {traditional_count} 筆 / 廉航 {lcc_count} 筆 / 共 {len(group)} 筆"
+
+            console.print()
+            console.print(Panel(
+                f"[bold white]📅 出發日期：{dep_date}[/bold white]\n"
+                f"[dim]{count_str}[/dim]\n"
+                f"[green]最低價：{dest_summary}[/green]",
+                title=f"[bold cyan]【第 {date_idx + 1}/{len(sorted_dates)} 組】[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 2),
+            ))
+        else:
+            print(f"\n{'━' * 80}")
+            print(f"  📅 出發日期：{dep_date}  ({len(group)} 筆)")
+            print(f"{'━' * 80}")
+
         if not split_lcc:
             _render_table(group[:top_n], f"{title}  📅 {dep_date}")
             continue
+
         traditional = [r for r in group if r.airline_type == "traditional"]
         lcc         = [r for r in group if r.airline_type == "LCC"]
         unknown     = [r for r in group if r.airline_type not in ("traditional", "LCC")]
         if traditional:
-            _render_table(traditional[:top_n], f"✈  {title}  📅 {dep_date} — 傳統航空",
+            _render_table(traditional[:top_n], f"✈  傳統航空  📅 {dep_date}",
                           header_style="bold blue")
         if lcc:
-            _render_table(lcc[:top_n], f"💸 {title}  📅 {dep_date} — 廉航",
+            _render_table(lcc[:top_n], f"💸 廉價航空  📅 {dep_date}",
                           header_style="bold yellow")
         if unknown:
             # P2 FIX: was `if unknown and not traditional and not lcc:` which
@@ -260,12 +302,97 @@ def _print_by_date(
             # rows existed in the same date group.
             if traditional or lcc:
                 _render_table(unknown[:top_n],
-                              f"✈  {title}  📅 {dep_date} — 未分類航空",
+                              f"✈  未分類航空  📅 {dep_date}",
                               header_style="bold cyan")
             else:
                 _render_table(unknown[:top_n],
-                              f"✈  {title}  📅 {dep_date}",
+                              f"✈  {dep_date}",
                               header_style="bold cyan")
+
+    # ── Cross-date cheapest-per-destination summary ───────────────────────
+    if len(sorted_dates) > 1:
+        _render_cheapest_summary(records, title)
+
+
+def _render_cheapest_summary(
+    records: List[FlightRecord],
+    title: str,
+) -> None:
+    """
+    彈性日期搜尋結束後，顯示「全日期最低價」摘要 —
+    按目的地列出最便宜的出發日、航空公司、價格，分傳統/廉航兩表。
+    """
+    # Build cheapest per (destination, airline_type)
+    best: Dict[str, Dict[str, FlightRecord]] = defaultdict(dict)  # dest → {type → record}
+    for r in records:
+        atype = r.airline_type if r.airline_type in ("traditional", "LCC") else "unknown"
+        key = r.arrival_airport
+        if atype not in best[key] or r.price < best[key][atype].price:
+            best[key][atype] = r
+
+    if _HAS_RICH:
+        console.print()
+        console.print(Panel(
+            "[bold magenta]🏆 彈性日期搜尋 — 各目的地最低價總覽[/bold magenta]",
+            border_style="magenta",
+        ))
+
+        for atype, label, style in [
+            ("traditional", "✈  傳統航空 — 最低價", "bold blue"),
+            ("LCC",         "💸 廉價航空 — 最低價", "bold yellow"),
+            ("unknown",     "❓ 未分類 — 最低價",    "bold cyan"),
+        ]:
+            rows = sorted(
+                [(dest, rec) for dest, types in best.items() if atype in types
+                 for rec in [types[atype]]],
+                key=lambda x: x[1].price,
+            )
+            if not rows:
+                continue
+            t = Table(title=label, box=box.ROUNDED, show_lines=True,
+                      highlight=True, header_style=style)
+            t.add_column("#",        justify="right",  style="dim",        width=3)
+            t.add_column("目的地",   style="cyan",     min_width=14)
+            t.add_column("最佳出發日", style="white",  min_width=10)
+            t.add_column("回程日",   style="white",    min_width=10)
+            t.add_column("航空公司", style="dim",      min_width=14)
+            t.add_column("轉機",     justify="center", style="magenta",    width=6)
+            t.add_column("來回總價", justify="right",  style="bold green", min_width=12)
+            t.add_column("訂票連結", style="blue",     min_width=14)
+
+            for i, (dest, r) in enumerate(rows, 1):
+                try:
+                    link_str = format_links_rich(BookingLinkFactory.from_record(r))
+                except Exception:
+                    link_str = "—"
+                t.add_row(
+                    str(i),
+                    dest_label(dest),
+                    r.departure_date,
+                    r.return_date or "—",
+                    r.airline or "—",
+                    r.stops_str,
+                    format_price(r.price, r.currency),
+                    link_str,
+                )
+            console.print(t)
+    else:
+        print(f"\n{'═' * 80}")
+        print(f"  🏆 彈性日期搜尋 — 各目的地最低價總覽")
+        print(f"{'═' * 80}")
+        all_best = sorted(
+            [(dest, atype, rec) for dest, types in best.items()
+             for atype, rec in types.items()],
+            key=lambda x: x[2].price,
+        )
+        for i, (dest, atype, r) in enumerate(all_best, 1):
+            type_tag = "傳統" if atype == "traditional" else ("廉航" if atype == "LCC" else "??")
+            print(
+                f"  {i:>2}. [{type_tag}] {dest_label(dest):<16} "
+                f"去:{r.departure_date} ↩{r.return_date or '—'}  "
+                f"{r.airline:<16}  {format_price(r.price, r.currency):>12}"
+            )
+        print(f"{'═' * 80}\n")
 
 
 def _render_table(
@@ -452,10 +579,12 @@ def _summary_table(recs: List[FlightRecord], title: str, top_n: int) -> None:
 def export_csv(
     records:  List[FlightRecord],
     filename: Optional[str] = None,
+    group_by_date: bool = False,
 ) -> Path:
     """
     匯出 CSV。
-    欄位包含完整去程與回程資訊（日期、時間、時長）及兩種訂票連結。
+    group_by_date=True 時：按出發日期 → 航空類型（傳統/廉航）→ 價格排序，
+    每組之間插入空行與標題行，方便在 Excel/Google Sheets 閱讀。
     """
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     if not filename:
@@ -463,41 +592,127 @@ def export_csv(
         filename = f"flights_{ts}.csv"
     path = REPORT_DIR / filename
 
-    sorted_records = sorted(records, key=lambda x: x.price)
-    link_sets      = [BookingLinkFactory.from_record(r) for r in sorted_records]
+    _AIRLINE_TYPE_LABELS = {
+        "traditional": "傳統航空",
+        "LCC":         "廉價航空",
+        "unknown":     "未分類",
+    }
+    _AIRLINE_TYPE_ORDER = {"traditional": 0, "LCC": 1, "unknown": 2}
+
+    HEADER = [
+        "排名", "票種", "航空類型",
+        "目的地代碼", "目的地",
+        "出發機場",
+        "去程日", "去程出發時間", "去程抵達時間", "去程時長(分)", "轉機",
+        "回程日", "回程出發時間", "回程抵達時間", "回程時長(分)",
+        "航空公司", "航班號", "票價", "幣別", "資料時間",
+        "Google Flights 連結",
+        "航空官網連結",
+    ]
+
+    def _write_record_row(writer, rank: int, r: FlightRecord, ls) -> None:
+        google_url  = ls.google_link.url      if ls.google_link      else ""
+        airline_url = ls.airline_links[0].url if ls.airline_links    else ""
+        writer.writerow([
+            rank,
+            "來回" if r.is_roundtrip else "單程",
+            _AIRLINE_TYPE_LABELS.get(r.airline_type, r.airline_type or "unknown"),
+            r.arrival_airport, dest_label(r.arrival_airport),
+            r.departure_airport,
+            r.departure_date, r.departure_time, r.arrival_time,
+            r.duration_minutes, r.stops_str,
+            r.return_date or "",
+            r.return_dep_time or "",
+            r.return_arr_time or "",
+            r.return_duration or "",
+            r.airline, r.flight_numbers,
+            r.price, r.currency, r.fetched_at[:19],
+            google_url,
+            airline_url,
+        ])
 
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "排名", "票種", "航空類型",
-            "目的地代碼", "目的地",
-            "出發機場",
-            "去程日", "去程出發時間", "去程抵達時間", "去程時長(分)", "轉機",
-            "回程日", "回程出發時間", "回程抵達時間", "回程時長(分)",
-            "航空公司", "航班號", "票價", "幣別", "資料時間",
-            "Google Flights 連結",
-            "航空官網連結",
-        ])
-        for i, (r, ls) in enumerate(zip(sorted_records, link_sets), 1):
-            google_url  = ls.google_link.url      if ls.google_link      else ""
-            airline_url = ls.airline_links[0].url if ls.airline_links    else ""
+
+        if group_by_date:
+            # Sort: date → airline_type → price
+            def _sort_key(r: FlightRecord):
+                atype = r.airline_type if r.airline_type in _AIRLINE_TYPE_ORDER else "unknown"
+                return (r.departure_date, _AIRLINE_TYPE_ORDER.get(atype, 9), r.price)
+
+            sorted_records = sorted(records, key=_sort_key)
+
+            # Group by date
+            by_date: Dict[str, List[FlightRecord]] = defaultdict(list)
+            for r in sorted_records:
+                by_date[r.departure_date].append(r)
+
+            first_section = True
+            for dep_date in sorted(by_date.keys()):
+                date_group = by_date[dep_date]
+
+                # Sub-group by airline type
+                by_type: Dict[str, List[FlightRecord]] = defaultdict(list)
+                for r in date_group:
+                    atype = r.airline_type if r.airline_type in _AIRLINE_TYPE_ORDER else "unknown"
+                    by_type[atype].append(r)
+
+                for atype in ["traditional", "LCC", "unknown"]:
+                    type_records = by_type.get(atype)
+                    if not type_records:
+                        continue
+
+                    # Separator blank row between sections
+                    if not first_section:
+                        writer.writerow([])
+
+                    # Section title row
+                    type_label = _AIRLINE_TYPE_LABELS.get(atype, atype)
+                    writer.writerow([f"📅 {dep_date}  —  {type_label}  ({len(type_records)} 筆)"])
+                    writer.writerow(HEADER)
+
+                    link_sets = [BookingLinkFactory.from_record(r) for r in type_records]
+                    for i, (r, ls) in enumerate(zip(type_records, link_sets), 1):
+                        _write_record_row(writer, i, r, ls)
+                    first_section = False
+
+            # ── Cheapest-per-destination summary sheet ─────────────────────
+            writer.writerow([])
+            writer.writerow([])
+            writer.writerow(["🏆 各目的地最低價總覽"])
             writer.writerow([
-                i,
-                "來回" if r.is_roundtrip else "單程",
-                r.airline_type or "unknown",
-                r.arrival_airport, dest_label(r.arrival_airport),
-                r.departure_airport,
-                r.departure_date, r.departure_time, r.arrival_time,
-                r.duration_minutes, r.stops_str,
-                r.return_date or "",
-                r.return_dep_time or "",
-                r.return_arr_time or "",
-                r.return_duration or "",
-                r.airline, r.flight_numbers,
-                r.price, r.currency, r.fetched_at[:19],
-                google_url,
-                airline_url,
+                "排名", "航空類型", "目的地代碼", "目的地",
+                "最佳出發日", "回程日", "航空公司", "轉機",
+                "來回總價", "幣別",
+                "Google Flights 連結", "航空官網連結",
             ])
+
+            best: Dict[str, FlightRecord] = {}
+            for r in records:
+                key = f"{r.arrival_airport}|{r.airline_type or 'unknown'}"
+                if key not in best or r.price < best[key].price:
+                    best[key] = r
+            summary_rows = sorted(best.values(), key=lambda r: r.price)
+            for i, r in enumerate(summary_rows, 1):
+                ls = BookingLinkFactory.from_record(r)
+                google_url  = ls.google_link.url      if ls.google_link      else ""
+                airline_url = ls.airline_links[0].url if ls.airline_links    else ""
+                writer.writerow([
+                    i,
+                    _AIRLINE_TYPE_LABELS.get(r.airline_type, r.airline_type or "unknown"),
+                    r.arrival_airport, dest_label(r.arrival_airport),
+                    r.departure_date, r.return_date or "",
+                    r.airline or "—", r.stops_str,
+                    r.price, r.currency,
+                    google_url, airline_url,
+                ])
+        else:
+            # ── Original flat CSV ──────────────────────────────────────────
+            writer.writerow(HEADER)
+            sorted_records = sorted(records, key=lambda x: x.price)
+            link_sets      = [BookingLinkFactory.from_record(r) for r in sorted_records]
+            for i, (r, ls) in enumerate(zip(sorted_records, link_sets), 1):
+                _write_record_row(writer, i, r, ls)
 
     _print(f"[green]✓ CSV 已儲存：{path}[/green]" if _HAS_RICH else f"✓ CSV 已儲存：{path}")
     return path
