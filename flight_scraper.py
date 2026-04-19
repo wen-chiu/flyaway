@@ -251,6 +251,7 @@ class FlightScraper:
         """
         批量搜尋來回票。
         outbound_dates 與 return_dates 一對一對應；若 return_dates 只有一個則廣播。
+        Uses Rich progress bar when available.
         """
         if len(return_dates) == 1:
             return_dates = return_dates * len(outbound_dates)
@@ -262,7 +263,14 @@ class FlightScraper:
                   for out, ret in zip(outbound_dates, return_dates)]
         total = len(combos)
 
-        for idx, (dest, out_d, ret_d) in enumerate(combos, 1):
+        # Use Rich progress bar if available and there are multiple combos
+        try:
+            from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+            _use_progress = total > 1
+        except ImportError:
+            _use_progress = False
+
+        def _do_search(idx, dest, out_d, ret_d):
             from config import get_max_stops_for, get_region
 
             eff_stops = get_max_stops_for(dest, self.max_stops)
@@ -277,6 +285,23 @@ class FlightScraper:
             records = self.search_roundtrip(from_airport, dest, out_d, ret_d, adults)
             all_records.extend(records)
             time.sleep(REQUEST_DELAY_SEC + random.uniform(0, 0.8))
+
+        if _use_progress:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeRemainingColumn(),
+            ) as progress:
+                task = progress.add_task("搜尋來回票…", total=total)
+                for idx, (dest, out_d, ret_d) in enumerate(combos, 1):
+                    progress.update(task, description=f"搜尋 {from_airport}⇄{dest} {out_d}")
+                    _do_search(idx, dest, out_d, ret_d)
+                    progress.advance(task)
+        else:
+            for idx, (dest, out_d, ret_d) in enumerate(combos, 1):
+                _do_search(idx, dest, out_d, ret_d)
 
         return all_records
 
