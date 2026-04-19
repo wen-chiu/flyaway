@@ -785,8 +785,6 @@ def _parse_flight_obj(
         if isinstance(fn_raw, (list, tuple)) else str(fn_raw)
     )
 
-    dep_time = str(getattr(f, "departure", "") or getattr(f, "departure_time", "") or "").strip()
-    arr_time = str(getattr(f, "arrival", "") or getattr(f, "arrival_time", "") or "").strip()
     ahead = str(getattr(f, "arrival_time_ahead", "") or "").strip()
     if ahead and arr_time:
         arr_time = f"{arr_time} {ahead}"
