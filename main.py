@@ -586,6 +586,88 @@ def cmd_holidays(args: argparse.Namespace) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 子命令：vacation
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cmd_vacation(args: argparse.Namespace) -> None:
+    """Vacation Mode: 根據預設假期模式搜尋最佳票價。"""
+    from config import (
+        DEFAULT_DEPARTURE, VACATION_MODES,
+        ASIA_DESTINATIONS, NON_ASIA_DESTINATIONS,
+        VACATION_TOP_WINDOWS, VACATION_TOP_DEST, VACATION_TOP_RESULTS,
+    )
+    from vacation_windows import find_vacation_windows, print_vacation_windows
+    from flight_scraper import FlightScraper
+    from database import Database
+    from reporter import print_vacation_summary, export_csv
+
+    mode = getattr(args, "mode", "short")
+    cfg = VACATION_MODES[mode]
+    from_airport = (getattr(args, "from_airport", None) or DEFAULT_DEPARTURE).upper()
+    top_n = getattr(args, "top_n", VACATION_TOP_RESULTS) or VACATION_TOP_RESULTS
+    flex_override = getattr(args, "flex", None)
+
+    # 1. 找旅遊窗口
+    windows = find_vacation_windows(
+        mode=mode,
+        horizon_days=cfg["horizon"],
+        flex_days_override=flex_override,
+    )
+
+    if not windows:
+        _print("⚠️ 找不到符合條件的旅遊窗口。")
+        return
+
+    print_vacation_windows(windows, mode=mode, top_n=VACATION_TOP_WINDOWS)
+
+    # 2. 選擇目的地
+    dest_key = cfg["destinations"]
+    if dest_key == "asia":
+        destinations = ASIA_DESTINATIONS[:VACATION_TOP_DEST]
+    else:
+        destinations = NON_ASIA_DESTINATIONS[:VACATION_TOP_DEST]
+
+    top_windows = windows[:VACATION_TOP_WINDOWS]
+    out_dates = [w.depart for w in top_windows]
+    ret_dates = [w.ret for w in top_windows]
+
+    if _HAS_RICH:
+        console.print(
+            f"\n[bold]{cfg['label']}[/bold]  "
+            f"{len(destinations)} 個目的地 × {len(top_windows)} 個窗口  "
+            f"max_stops={cfg['max_stops']}\n"
+        )
+
+    auto_mode = getattr(args, "yes", False)
+    if not auto_mode and _HAS_RICH:
+        if not Confirm.ask("  確認開始搜尋？", default=True):
+            return
+
+    # 3. 搜尋
+    scraper = FlightScraper(
+        max_stops=cfg["max_stops"],
+        max_duration_hours=cfg["max_duration"],
+    )
+    db = Database()
+
+    all_records = scraper.search_roundtrip_many(
+        from_airport=from_airport,
+        destinations=destinations,
+        outbound_dates=out_dates,
+        return_dates=ret_dates,
+    )
+
+    if all_records:
+        db.bulk_insert_flights(all_records)
+        print_vacation_summary(all_records, mode_label=cfg["label"], top_n=top_n)
+    else:
+        _print("⚠️ 沒有找到符合條件的機票。")
+
+    if all_records and (getattr(args, "export_csv", False)):
+        export_csv(all_records, group_by_date=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 子命令：debug-api
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -708,9 +790,12 @@ def build_parser() -> argparse.ArgumentParser:
 範例：
   python main.py search                                        # 互動式（全功能）
   python main.py search --dest NRT --outbound 2026-05-01 --return 2026-05-05
+  python main.py search --dest NRT --outbound 2026-05-01 --return 5 --twd --yes
   python main.py search --dest ALL --use-holidays --flex 2 --twd
   python main.py search --dest "歐洲" --outbound 2026-07-01 --flex 1
   python main.py search --dest "東北亞" --outbound 2026-05-01    # 日本+韓國+港澳
+  python main.py vacation --mode short                         # 亞洲短途假期
+  python main.py vacation --mode happy --export-csv            # 長假模式+匯出
   python main.py schedule --time 08:00 --run-now
   python main.py holidays --intercontinental
   python main.py debug-api --dest SIN
@@ -737,6 +822,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_s.add_argument("--max-duration",type=int, help="最長飛行時數（預設 26）")
     p_s.add_argument("--top-n",       type=int, default=20, help="顯示前 N 筆（預設 20）")
     p_s.add_argument("--export-csv",  action="store_true", help="自動匯出 CSV")
+    p_s.add_argument("-y", "--yes",   action="store_true",
+                     help="跳過所有確認提示（適合自動化/CI）")
+
+    # ── vacation ──────────────────────────────────────────────────────────────
+    p_v = sub.add_parser("vacation", help="Vacation Mode 假期模式搜尋")
+    p_v.add_argument("--mode", choices=["short", "long", "happy"], default="short",
+                     help="假期模式：short=5天亞洲 / long=9天跨洲 / happy=16天跨洲")
+    p_v.add_argument("--from",    dest="from_airport", metavar="IATA",
+                     help="出發機場（預設 TPE）")
+    p_v.add_argument("--top-n",   type=int, default=10, help="每組顯示前 N 筆")
+    p_v.add_argument("--flex",    type=int, metavar="N",
+                     help="彈性天數（覆蓋模式預設）")
+    p_v.add_argument("--export-csv", action="store_true", help="自動匯出 CSV")
+    p_v.add_argument("-y", "--yes",  action="store_true",
+                     help="跳過所有確認提示")
 
     # ── schedule ──────────────────────────────────────────────────────────────
     p_sc = sub.add_parser("schedule", help="啟動每日自動排程")
@@ -787,9 +887,11 @@ def main() -> None:
         args.max_duration = None
         args.top_n        = 20
         args.export_csv   = False
+        args.yes          = False
 
     dispatch = {
         "search":    cmd_search,
+        "vacation":  cmd_vacation,
         "schedule":  cmd_schedule,
         "holidays":  cmd_holidays,
         "debug-api": cmd_debug_api,
