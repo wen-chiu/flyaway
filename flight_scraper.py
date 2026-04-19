@@ -741,11 +741,16 @@ def _parse_flight_obj(
     the price magnitudes confirm TWD values, we always store TWD.
     """
     price_raw = str(getattr(f, "price", None) or getattr(f, "min_price", None) or "")
-    price, _ = _parse_price_and_currency(price_raw)   # currency label discarded
+    price, detected_currency = _parse_price_and_currency(price_raw)
     if price <= 0:
         return None
 
-    # Always use TWD — fast-flights may report MYR regardless of IP/locale.
+    # Convert to TWD if the API returned a foreign currency (e.g. MYR).
+    # fast-flights may report MYR regardless of IP/locale.
+    from config import TWD_FALLBACK_RATES
+    if detected_currency and detected_currency.upper() != "TWD":
+        rate = TWD_FALLBACK_RATES.get(detected_currency.upper(), 1.0)
+        price = round(price * rate, 0)
     use_currency = "TWD"
 
     dur_raw = getattr(f, "duration", None) or getattr(f, "travel_duration", None) or ""
