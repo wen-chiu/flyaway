@@ -771,6 +771,14 @@ def _parse_flight_obj(
 
     airline = str(getattr(f, "name", "") or getattr(f, "airline", "") or "").strip()
 
+    # BUG 3 FIX: Skip flights where both airline and times are empty — these
+    # are placeholder/header rows returned by some fetch modes.
+    dep_time = str(getattr(f, "departure", "") or getattr(f, "departure_time", "") or "").strip()
+    arr_time = str(getattr(f, "arrival", "") or getattr(f, "arrival_time", "") or "").strip()
+    if not airline and not dep_time and not arr_time and duration <= 0:
+        logger.debug(f"  跳過空白航班記錄 (price={price})")
+        return None
+
     fn_raw = getattr(f, "flight_number", None) or getattr(f, "flight_numbers", None) or []
     fn_str = (
         ", ".join(str(x) for x in fn_raw)
