@@ -125,25 +125,20 @@ def _build_google_flights_url(
     currency: str = "TWD",
 ) -> str:
     """
-    Build a Google Flights deep link using the #flt= hash fragment format.
+    Build a Google Flights search URL that actually populates the search form.
 
-    Format: #flt=ORIG.DEST.YYYY-MM-DD[*DEST.ORIG.YYYY-MM-DD];c:CUR;e:N;s:S[*S];t:f
-
-    This format has been stable since ~2018. Google Flights reads the hash
-    fragment client-side to populate the search form with exact parameters,
-    so the user sees flight results immediately without re-entering anything.
+    Google Flights stopped parsing the legacy `#flt=` hash fragment, so we now
+    use the documented natural-language `q=` query parameter. The Google
+    Travel search handler parses IATA codes, dates ("on YYYY-MM-DD"), and
+    return dates ("through YYYY-MM-DD") and pre-fills the Flights UI.
     """
-    segments = [f"{from_airport}.{to_airport}.{depart_date}"]
+    # Natural-language query — Google Travel parses this into the Flights form.
+    parts = [f"Flights from {from_airport} to {to_airport} on {depart_date}"]
     if return_date:
-        segments.append(f"{to_airport}.{from_airport}.{return_date}")
-    flt = "*".join(segments)
-    opts = [f"c:{currency}", f"e:{adults}"]
-    if max_stops >= 0:
-        stops = str(max_stops)
-        opts.append(f"s:{stops}*{stops}" if return_date else f"s:{stops}")
-    opts.append("t:f")  # economy cabin
-    hash_frag = f"flt={flt};{';'.join(opts)}"
-    return f"https://www.google.com/travel/flights?hl=zh-TW&curr={currency}#{hash_frag}"
+        parts.append(f"through {return_date}")
+    query = " ".join(parts)
+    params = urlencode({"q": query, "curr": currency, "hl": "zh-TW"})
+    return f"https://www.google.com/travel/flights?{params}"
 
 
 def _build_google_flights_link(record: "FlightRecord") -> BookingLink:
