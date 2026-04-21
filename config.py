@@ -28,7 +28,7 @@ WORLD_DESTINATIONS: dict[str, list[str]] = {
         "ICN", "GMP", "PUS", "CJU", "TAE", "CJJ", "MWX",
     ],
     "SE Asia": [
-        "BKK", "DMK", "SIN", "KUL", "CGK", "MNL", "CRK",
+        "BKK", "DMK", "SIN", "KUL", "CGK", "CRK", # "MNL",
         "DPS", "HAN", "SGN", "DAD", "NHA", "CEB",
         "CNX", "PQC", "PEN", "BKI", "BWN",
         "RGN", "MDL", "REP", "PNH", "VTE",
@@ -70,11 +70,6 @@ REGION_ALIASES: dict[str, str] = {
     # English variants
     "Southeast Asia": "SE Asia",
     "North America":  "N America",
-    # Legacy keys (backward compatibility with old --dest arguments)
-    "東南亞 SE Asia": "SE Asia",
-    "歐洲 Europe":    "Europe",
-    "北美 N America": "N America",
-    "大洋洲 Oceania": "Oceania",
 }
 
 # ── Composite regions (semantic groups spanning multiple atomic regions) ──────
