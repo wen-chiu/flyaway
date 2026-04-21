@@ -65,6 +65,26 @@ This checks all required packages and offers to install any that are missing.
 python main.py                      # Interactive mode — walks you through everything
 ```
 
+### 4. GUI (Streamlit)
+
+Prefer clicking over typing? The project ships with a Streamlit front-end that
+reuses every scraping / pricing module unchanged, so clickable booking links,
+CSV download, and tabbed filters all work out of the box.
+
+```bash
+pip install -r requirements.txt     # pulls streamlit + pandas
+streamlit run app.py                # opens http://localhost:8501 in your browser
+```
+
+Pages available in the sidebar:
+
+- **🔍 搜尋機票** — full search with destination groups, ±flex days, TWD pricing
+- **🏖 假期模式** — short / long / happy vacation presets
+- **📅 台灣假期** — best holiday windows, one-click prefill to the search page
+
+The CLI (`python main.py …`) keeps working exactly as before — the GUI is a
+pure additive layer under `ui/`.
+
 ---
 
 ## Usage Guide

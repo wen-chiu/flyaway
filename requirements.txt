@@ -22,3 +22,7 @@ requests==2.32.3
 
 # ── Environment config (.env support) ────────────────────────────────────────
 python-dotenv==1.0.1
+
+# ── GUI (Streamlit presentation layer) ───────────────────────────────────────
+streamlit>=1.30
+pandas>=2.0
