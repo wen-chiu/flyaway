@@ -2,108 +2,238 @@
 taiwan_holidays.py — 台灣國定假日解析 & 最少請假出遊規劃
 =============================================================
 功能：
-  1. 抓取台灣國定假日（含農曆動態假日）
-  2. 計算「橋接假期」(連假延伸)
+  1. 動態抓取台灣官方行事曆（含補假、調整放假、彈性放假）
+     - 主要資料源：ruyut/TaiwanCalendar（基於行政院人事行政總處公告）
+     - 本地 JSON 快取（./.cache/taiwan_holidays/{year}.json）
+     - Fallback：`holidays` 套件 → 最後才用少量硬編碼保底
+  2. 計算「橋接假期」(連假延伸、兩個相近假期相連)
   3. 找出最少請假天數換最多出遊天數的最佳時間窗口
+  4. 自動過濾已過去的日期，預設依出發日期升冪排列
 """
 
 from __future__ import annotations
 
-import calendar
+import json
+import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional
 
-# ── 嘗試使用 holidays 套件 ────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
+
+# ── 嘗試使用 holidays 套件（備援） ────────────────────────────────────────────
 try:
     import holidays as holidays_pkg
     _HAS_HOLIDAYS_PKG = True
 except ImportError:
     _HAS_HOLIDAYS_PKG = False
 
-# ── 硬編碼台灣假日（做為備用 & 補充農曆假日）─────────────────────────────────
-_HARDCODED: dict[int, dict[str, str]] = {
+# ── HTTP 資料源（動態抓取） ──────────────────────────────────────────────────
+try:
+    import requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
+
+# ruyut/TaiwanCalendar — 以政府公告行事曆為來源，每年更新，含補假/彈性放假
+_REMOTE_SOURCES: list[str] = [
+    "https://cdn.jsdelivr.net/gh/ruyut/TaiwanCalendar/data/{year}.json",
+    "https://raw.githubusercontent.com/ruyut/TaiwanCalendar/main/data/{year}.json",
+]
+
+# 本地快取位置（置於專案底下，方便打包時一併帶走）
+_CACHE_DIR = Path(__file__).parent / ".cache" / "taiwan_holidays"
+_CACHE_TTL_DAYS = 30  # 快取新鮮度；過期會重新抓取，但抓不到仍可用舊檔
+
+# ── 窗口策略常數 ─────────────────────────────────────────────────────────────
+# 只推薦固定長度的「標準窗口」(9 天) + 兩個假日相鄰時的「橋接窗口」(<=17 天)。
+# 彈性出發請於搜尋頁用 ±flex_days 額外處理，此檔維持收斂的推薦清單。
+TRIP_DAYS        = 9    # 標準窗口天數（含兩個完整週末，涵蓋短/中假期需求）
+BRIDGE_MAX_DAYS  = 17   # 橋接窗口上限；中秋(9/25)↔國慶(10/10 週六+10/11 週日) ≈ 17 天
+
+# ── 最終 fallback：最少量硬編碼（僅在網路 & holidays 套件皆無法使用時生效）──
+_HARDCODED_FALLBACK: dict[int, dict[str, str]] = {
     2026: {
-        "2026-01-01": "元旦 New Year's Day",
-        "2026-02-16": "農曆除夕 Lunar New Year's Eve",
-        "2026-02-17": "農曆初一 Lunar New Year (Day 1)",
-        "2026-02-18": "農曆初二 Lunar New Year (Day 2)",
-        "2026-02-19": "農曆初三 Lunar New Year (Day 3)",
-        "2026-02-20": "農曆初四 Lunar New Year (Day 4)",
-        "2026-02-28": "和平紀念日 Peace Memorial Day",
-        "2026-04-05": "清明節 Tomb Sweeping Day",
-        "2026-04-04": "兒童節 Children's Day",
-        "2026-05-01": "勞動節 Labor Day",
-        "2026-06-19": "端午節 Dragon Boat Festival",
-        "2026-09-25": "中秋節 Mid-Autumn Festival",
-        "2026-10-10": "國慶日 National Day",
-        "2026-10-25": "光復節（台灣光復暨古寧頭紀念日）",
-        "2026-12-25": "行憲紀念日",
+        "2026-01-01": "開國紀念日",
+        "2026-02-16": "農曆除夕",
+        "2026-02-17": "春節",
+        "2026-02-18": "春節",
+        "2026-02-19": "春節",
+        "2026-02-20": "春節",
+        "2026-02-27": "和平紀念日（補假）",
+        "2026-02-28": "和平紀念日",
+        "2026-04-03": "兒童節（補假）",
+        "2026-04-04": "兒童節",
+        "2026-04-05": "清明節",
+        "2026-04-06": "清明節（補假）",
+        "2026-05-01": "勞動節",
+        "2026-06-19": "端午節",
+        "2026-09-25": "中秋節",
+        "2026-10-09": "國慶日（彈性放假）",
+        "2026-10-10": "國慶日",
     },
 }
 
 
 @dataclass
 class HolidayWindow:
-    """代表一段連假或延伸假期的時間窗口"""
+    """代表一段連假或延伸假期的時間窗口。"""
     start_date: date
-    end_date: date
+    end_date:   date
     total_days: int
-    leave_days: int           # 需要請幾天假
-    free_days: int            # 免費放假天數（含例假日 & 國定假日）
+    leave_days: int
+    free_days:  int
     holidays_included: list[str] = field(default_factory=list)
-    efficiency: float = 0.0   # total_days / (leave_days + 1)，越高越值錢
+    leave_dates:       list[date] = field(default_factory=list)
+    efficiency:        float      = 0.0
+    is_bridge:         bool       = False
 
     @property
     def label(self) -> str:
-        return (f"{self.start_date.strftime('%Y-%m-%d')} ～ "
-                f"{self.end_date.strftime('%Y-%m-%d')} "
-                f"({self.total_days}天 / 請{self.leave_days}天假)")
+        tag = " [橋接]" if self.is_bridge else ""
+        return (
+            f"{self.start_date.strftime('%Y-%m-%d')} ～ "
+            f"{self.end_date.strftime('%Y-%m-%d')} "
+            f"({self.total_days}天 / 請{self.leave_days}天假){tag}"
+        )
+
+
+# ── 資料來源：動態抓取 + 快取 ────────────────────────────────────────────────
+def _cache_path(year: int) -> Path:
+    return _CACHE_DIR / f"{year}.json"
+
+
+def _read_cache(year: int) -> Optional[list[dict]]:
+    p = _cache_path(year)
+    if not p.exists():
+        return None
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("讀取台灣行事曆快取失敗 %s: %s", p, exc)
+        return None
+
+
+def _write_cache(year: int, data: list[dict]) -> None:
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with _cache_path(year).open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("寫入台灣行事曆快取失敗: %s", exc)
+
+
+def _cache_is_fresh(year: int) -> bool:
+    p = _cache_path(year)
+    if not p.exists():
+        return False
+    age = datetime.now().timestamp() - p.stat().st_mtime
+    return age < _CACHE_TTL_DAYS * 86400
+
+
+def _fetch_remote(year: int) -> Optional[list[dict]]:
+    if not _HAS_REQUESTS:
+        return None
+    for tmpl in _REMOTE_SOURCES:
+        url = tmpl.format(year=year)
+        try:
+            r = requests.get(url, timeout=6)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and data:
+                    return data
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("抓取 %s 失敗: %s", url, exc)
+    return None
+
+
+def _load_taiwan_calendar(year: int) -> Optional[list[dict]]:
+    """優先權：新鮮快取 → 線上抓取 → 舊快取 → None"""
+    if _cache_is_fresh(year):
+        cached = _read_cache(year)
+        if cached:
+            return cached
+    remote = _fetch_remote(year)
+    if remote is not None:
+        _write_cache(year, remote)
+        return remote
+    return _read_cache(year)
+
+
+def _parse_calendar_entries(entries: list[dict]) -> Dict[date, str]:
+    """
+    解析 ruyut/TaiwanCalendar 格式：
+        {"date":"20260101","week":"四","isHoliday":true,"description":"開國紀念日"}
+    僅回傳「被標記為假日」的日期。一般週末且無名稱的不會被列為命名假日，
+    但補假、調整放假、彈性放假等會出現在平日，會被保留。
+    """
+    out: Dict[date, str] = {}
+    for e in entries:
+        try:
+            ds = str(e.get("date", ""))
+            if len(ds) != 8:
+                continue
+            d = date(int(ds[:4]), int(ds[4:6]), int(ds[6:8]))
+            if not bool(e.get("isHoliday", False)):
+                continue
+            desc = (e.get("description") or "").strip()
+            if not desc and d.weekday() >= 5:
+                continue  # 一般週末不必命名
+            out[d] = desc or "假日"
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 def _get_tw_holidays(year: int) -> Dict[date, str]:
-    """取得指定年份的台灣國定假日。"""
+    """取得指定年份的台灣國定假日（含補假 / 調整放假 / 彈性放假）。"""
     result: Dict[date, str] = {}
 
-    # 1. 使用 holidays 套件（如果有安裝）
+    entries = _load_taiwan_calendar(year)
+    if entries:
+        result.update(_parse_calendar_entries(entries))
+
     if _HAS_HOLIDAYS_PKG:
         try:
             tw = holidays_pkg.Taiwan(years=year)
             for d, name in tw.items():
-                result[d] = name
-        except Exception:
+                result.setdefault(d, name)
+        except Exception:  # noqa: BLE001
             pass
 
-    # 2. 補充硬編碼假日（只補缺，不覆蓋 holidays 套件結果）
-    #    原因：硬編碼內容可能包含日期/名稱的差異（例如光復節、行憲紀念日等），
-    #    若覆蓋就會降低「正確性」。
-    if year in _HARDCODED:
-        for date_str, name in _HARDCODED[year].items():
-            d = date.fromisoformat(date_str)
-            if d not in result:
-                result[d] = name
+    if not result and year in _HARDCODED_FALLBACK:
+        for date_str, name in _HARDCODED_FALLBACK[year].items():
+            result[date.fromisoformat(date_str)] = name
 
     return result
 
 
+def refresh_holiday_cache(years: Optional[list[int]] = None) -> dict[int, int]:
+    """強制重新抓取並更新指定年份的快取。回傳 {year: 命名假日天數}。"""
+    if years is None:
+        y = date.today().year
+        years = [y, y + 1]
+    out: dict[int, int] = {}
+    for y in years:
+        data = _fetch_remote(y)
+        if data is not None:
+            _write_cache(y, data)
+            out[y] = len(_parse_calendar_entries(data))
+    return out
+
+
+# ── 工具函式 ──────────────────────────────────────────────────────────────────
 def _is_off_day(d: date, holidays: Dict[date, str]) -> bool:
-    """判斷是否為「不需上班」的日子（週六日 or 國定假日）。"""
+    """判斷是否為「不需上班」的日子（週六日 or 國定假日/補假）。"""
     return d.weekday() >= 5 or d in holidays
 
 
-def get_off_days(
-    start_date: date,
-    end_date: date,
-) -> Dict[date, str]:
-    """
-    取得指定區間內「不需上班」的日期 -> 原因說明。
-
-    - 週六/週日：標記為「週末」
-    - holidays 套件提供的日期（包含「補假/補休/調整」）：使用其名稱
-    """
+def get_off_days(start_date: date, end_date: date) -> Dict[date, str]:
+    """取得指定區間內「不需上班」的日期 -> 原因說明。"""
     if end_date < start_date:
         return {}
-
     years = set(range(start_date.year, end_date.year + 1))
     all_holidays: Dict[date, str] = {}
     for y in years:
@@ -120,25 +250,10 @@ def get_off_days(
     return result
 
 
-def compute_leave_summary(
-    start_date: date,
-    end_date: date,
-) -> dict:
-    """
-    計算在「指定出遊區間」內，上班族需要請假的天數。
-
-    規則：
-    - 週六/週日：視為不需請假（free day）
-    - holidays 套件提供的補假/補休/國定假日：視為不需請假（free day）
-    - 其餘工作日：視為需要請假（leave day）
-    """
+def compute_leave_summary(start_date: date, end_date: date) -> dict:
+    """計算在指定區間內上班族需請假的天數。"""
     if end_date < start_date:
-        return {
-            "leave_days": 0,
-            "free_days": 0,
-            "total_days": 0,
-            "leave_dates": [],
-        }
+        return {"leave_days": 0, "free_days": 0, "total_days": 0, "leave_dates": []}
 
     off = get_off_days(start_date, end_date)
     total_days = (end_date - start_date).days + 1
@@ -146,140 +261,192 @@ def compute_leave_summary(
     leave_dates: list[date] = []
     d = start_date
     while d <= end_date:
-        # weekday: 0=Mon ... 4=Fri, 5=Sat, 6=Sun
         if d.weekday() < 5 and d not in off:
             leave_dates.append(d)
         d += timedelta(days=1)
 
-    leave_days = len(leave_dates)
-    free_days = total_days - leave_days
     return {
-        "leave_days": leave_days,
-        "free_days": free_days,
-        "total_days": total_days,
+        "leave_days":  len(leave_dates),
+        "free_days":   total_days - len(leave_dates),
+        "total_days":  total_days,
         "leave_dates": leave_dates,
     }
 
 
+# ── 主要：尋找最佳假期窗口 ───────────────────────────────────────────────────
+def _distinct_holiday_names(names: list[str]) -> list[str]:
+    """
+    正規化假日名稱 — 把「清明節（補假）」/「清明節」視為同一個節日，
+    以便判斷「橋接」時是否連接兩個不同的假日。
+    """
+    norm: list[str] = []
+    for n in names:
+        base = n
+        for sep in ("（", "("):
+            if sep in base:
+                base = base.split(sep)[0]
+        for suf in ("補假", "補休", "調整放假", "彈性放假", "假期"):
+            if base.endswith(suf):
+                base = base[: -len(suf)]
+        base = base.strip()
+        if base and base not in norm:
+            norm.append(base)
+    return norm
+
+
 def get_holiday_windows(
-    lookahead_days: int = 270,
-    min_trip_days:  int = 4,
-    max_trip_days:  int = 16,
-    max_leave_days: int = 10,
-    from_date: Optional[date] = None,
+    lookahead_days: int = 365,
+    from_date:      Optional[date] = None,
+    include_past:   bool = False,
+    **_legacy,   # 接受舊參數 (min_trip_days / max_trip_days / max_leave_days / sort_by) 以向下相容
 ) -> List[HolidayWindow]:
     """
-    分析未來 lookahead_days 天內，
-    找出所有「最少請假 / 最多出遊」的黃金時間窗口。
+    產出「圍繞國定假日」的推薦出遊窗口，只包含兩類：
 
-    Returns:
-        按出發日期排序的 HolidayWindow 清單
+    1. 標準窗口：每個國定假日一個 ``TRIP_DAYS`` (9) 天窗口，
+       以最少請假天數為目標選擇最佳起始日（自動包含 1–2 個完整週末）。
+    2. 橋接窗口：相鄰兩個假日 cluster 若總跨度 ≤ ``BRIDGE_MAX_DAYS`` (17)，
+       額外產出一個橫跨兩者的長連假窗口（例：中秋↔國慶 約 16–17 天）。
+
+    結果按出發日升冪排序；預設過濾已過期窗口。
     """
-    start = from_date or date.today()
-    end   = start + timedelta(days=lookahead_days)
+    today = date.today()
+    scan_start = from_date or today
+    scan_end   = scan_start + timedelta(days=lookahead_days)
 
-    # 收集所有年份的假日
-    years = set(range(start.year, end.year + 1))
+    years = set(range(scan_start.year, scan_end.year + 1))
     all_holidays: Dict[date, str] = {}
     for y in years:
         all_holidays.update(_get_tw_holidays(y))
 
-    # 找出每個可能的出發日期的「連休塊」
+    clusters = _build_clusters(all_holidays, scan_start, scan_end)
+    if not clusters:
+        return []
+
     windows: List[HolidayWindow] = []
-    seen_starts: set[date] = set()
 
-    current = start
-    while current <= end - timedelta(days=min_trip_days):
-        # 找到以 current 為起始點的最大連休塊
-        block_start = current
-        # 從 block_start 往前找（若前面也是假期，併入）
-        s = block_start
-        while s > start and _is_off_day(s - timedelta(days=1), all_holidays):
-            s -= timedelta(days=1)
-        block_start = s
+    # 1) 每個 cluster 一個標準 9 天窗口
+    for cluster in clusters:
+        w = _best_fixed_window(cluster, all_holidays, scan_end, TRIP_DAYS)
+        if w:
+            windows.append(w)
 
-        if block_start in seen_starts:
-            current += timedelta(days=1)
-            continue
+    # 2) 相鄰 cluster 之間的橋接窗口
+    for i in range(len(clusters) - 1):
+        c1, c2 = clusters[i], clusters[i + 1]
+        span = (c2.off_end - c1.off_start).days + 1
+        if TRIP_DAYS < span <= BRIDGE_MAX_DAYS:
+            windows.append(_make_window(c1.off_start, c2.off_end, all_holidays, force_bridge=True))
 
-        # 往後延伸，加上請假日
-        # 針對「台灣上班族」目標：盡量用最少請假把週末與國定假日串起來。
-        for leave_budget in range(0, max_leave_days + 1):
-            # 先找到現有假期塊結尾
-            e = block_start
-            while e <= end and _is_off_day(e, all_holidays):
-                e += timedelta(days=1)
-            block_end_natural = e - timedelta(days=1)
+    # 過濾 + 去重 + 依日期排序
+    if not include_past:
+        windows = [w for w in windows if w.end_date >= today]
 
-            # 嘗試在末尾加請假
-            extra_leave = 0
-            e = block_end_natural + timedelta(days=1)
-            while extra_leave < leave_budget and e <= end:
-                if not _is_off_day(e, all_holidays):
-                    extra_leave += 1
-                    # 再往後看有沒有接著的假期
-                    e += timedelta(days=1)
-                    while e <= end and _is_off_day(e, all_holidays):
-                        e += timedelta(days=1)
-                else:
-                    e += timedelta(days=1)
-
-            block_end = e - timedelta(days=1)
-            total = (block_end - block_start).days + 1
-
-            # 計算實際請假天數
-            actual_leave = sum(
-                1 for i in range(total)
-                if not _is_off_day(block_start + timedelta(days=i), all_holidays)
-            )
-
-            # 台灣上班族需求：建議窗口必須同時包含週六 + 週日
-            has_sat = any(
-                (block_start + timedelta(days=i)).weekday() == 5
-                for i in range(total)
-            )
-            has_sun = any(
-                (block_start + timedelta(days=i)).weekday() == 6
-                for i in range(total)
-            )
-
-            if (
-                min_trip_days <= total <= max_trip_days
-                and actual_leave == leave_budget
-                and has_sat
-                and has_sun
-            ):
-                included = [
-                    name for d, name in all_holidays.items()
-                    if block_start <= d <= block_end
-                ]
-                eff = total / (actual_leave + 1) if actual_leave >= 0 else total
-                windows.append(HolidayWindow(
-                    start_date=block_start,
-                    end_date=block_end,
-                    total_days=total,
-                    leave_days=actual_leave,
-                    free_days=total - actual_leave,
-                    holidays_included=list(set(included)),
-                    efficiency=round(eff, 2),
-                ))
-
-        seen_starts.add(block_start)
-        current = block_start + timedelta(days=1)
-
-    # 去重 & 排序：先按請假天數升序，再按效率降序
     unique: dict[tuple, HolidayWindow] = {}
     for w in windows:
-        key = (w.start_date, w.end_date)
-        if key not in unique or w.efficiency > unique[key].efficiency:
-            unique[key] = w
-
-    result = sorted(unique.values(), key=lambda w: (w.leave_days, -w.efficiency, w.start_date))
-    return result
+        unique[(w.start_date, w.end_date)] = w
+    return sorted(unique.values(), key=lambda w: w.start_date)
 
 
-def print_holiday_windows(windows: List[HolidayWindow], top_n: int = 15) -> None:
-    """用 Rich 表格漂亮印出假期窗口。"""
+# ── 內部輔助：cluster / 窗口建構 ─────────────────────────────────────────────
+@dataclass
+class _Cluster:
+    """圍繞一或多個連續國定假日的 off-day 連休區塊。"""
+    holidays: list[date]       # cluster 內的命名假日（依日期排序）
+    off_start: date            # 連續 off-day 區塊最早日期（可能是週末）
+    off_end:   date            # 連續 off-day 區塊最晚日期
+
+
+def _build_clusters(
+    holidays: Dict[date, str],
+    scan_start: date,
+    scan_end:   date,
+) -> list[_Cluster]:
+    """把 scan_start..scan_end 內的命名假日分群；同一 off-day 區塊共用一個 cluster。"""
+    named = sorted(d for d in holidays if scan_start <= d <= scan_end)
+    clusters: list[_Cluster] = []
+    for h in named:
+        # 展開 off-day 區塊
+        s = h
+        while _is_off_day(s - timedelta(days=1), holidays):
+            s -= timedelta(days=1)
+        e = h
+        while _is_off_day(e + timedelta(days=1), holidays):
+            e += timedelta(days=1)
+        if clusters and clusters[-1].off_start == s:
+            clusters[-1].holidays.append(h)
+        else:
+            clusters.append(_Cluster(holidays=[h], off_start=s, off_end=e))
+    return clusters
+
+
+def _make_window(
+    start: date,
+    end:   date,
+    holidays: Dict[date, str],
+    force_bridge: bool = False,
+) -> HolidayWindow:
+    total = (end - start).days + 1
+    leave_dates: list[date] = []
+    holiday_names: list[str] = []
+    for i in range(total):
+        d = start + timedelta(days=i)
+        if d in holidays:
+            holiday_names.append(holidays[d])
+        elif d.weekday() < 5:
+            leave_dates.append(d)
+
+    unique_names  = list(dict.fromkeys(holiday_names))
+    distinct_base = _distinct_holiday_names(unique_names)
+    return HolidayWindow(
+        start_date=start,
+        end_date=end,
+        total_days=total,
+        leave_days=len(leave_dates),
+        free_days=total - len(leave_dates),
+        holidays_included=unique_names,
+        leave_dates=leave_dates,
+        efficiency=round(total / (len(leave_dates) + 1), 2),
+        is_bridge=force_bridge or len(distinct_base) >= 2,
+    )
+
+
+def _best_fixed_window(
+    cluster:   _Cluster,
+    holidays:  Dict[date, str],
+    scan_end:  date,
+    trip_days: int,
+) -> Optional[HolidayWindow]:
+    """
+    在 cluster 周圍找一個長度固定為 trip_days 的窗口，使請假天數最少。
+    起點候選 = 能讓整個 cluster（的命名假日）完全落在窗口內的所有起點。
+    平手時取 (更早起點, 更靠週末) 以利週末出發。
+    """
+    first_h, last_h = cluster.holidays[0], cluster.holidays[-1]
+    cluster_span = (last_h - first_h).days + 1
+    if cluster_span > trip_days:
+        return None  # cluster 本身已超過 trip_days，用橋接處理
+
+    # 起點範圍：最早 = last_h - (trip_days-1)，最晚 = first_h
+    earliest = last_h - timedelta(days=trip_days - 1)
+    latest   = first_h
+    best: Optional[HolidayWindow] = None
+    d = earliest
+    while d <= latest:
+        end_d = d + timedelta(days=trip_days - 1)
+        if end_d > scan_end:
+            break
+        w = _make_window(d, end_d, holidays)
+        # 排序鍵：最少請假 → 起點接近週五（越晚越好，方便週五出發）→ 較早日期
+        key = (w.leave_days, -d.weekday(), d)
+        if best is None or key < (best.leave_days, -best.start_date.weekday(), best.start_date):
+            best = w
+        d += timedelta(days=1)
+    return best
+
+
+
+def print_holiday_windows(windows: List[HolidayWindow], top_n: int = 20) -> None:
     try:
         from rich.console import Console
         from rich.table import Table
@@ -289,24 +456,25 @@ def print_holiday_windows(windows: List[HolidayWindow], top_n: int = 15) -> None
         table.add_column("回程日", style="cyan")
         table.add_column("總天數", justify="right", style="green")
         table.add_column("請假天", justify="right", style="yellow")
-        table.add_column("效率指數", justify="right", style="magenta")
+        table.add_column("效率",   justify="right", style="magenta")
+        table.add_column("類型",   justify="center", style="dim")
         table.add_column("包含假日", style="dim")
 
         for w in windows[:top_n]:
             hols = " / ".join(w.holidays_included[:2])
             if len(w.holidays_included) > 2:
-                hols += f" +{len(w.holidays_included)-2}個"
+                hols += f" +{len(w.holidays_included)-2}"
             table.add_row(
                 w.start_date.strftime("%Y-%m-%d (%a)"),
                 w.end_date.strftime("%Y-%m-%d (%a)"),
                 str(w.total_days),
                 str(w.leave_days),
                 str(w.efficiency),
-                hols,
+                "[bold]橋接[/bold]" if w.is_bridge else "連假",
+                hols or "—",
             )
         console.print(table)
     except ImportError:
-        # Fallback 純文字
         print(f"\n{'='*70}")
         print(f"{'最佳出遊時間窗口':^60}")
         print(f"{'='*70}")
@@ -316,5 +484,5 @@ def print_holiday_windows(windows: List[HolidayWindow], top_n: int = 15) -> None
 
 
 if __name__ == "__main__":
-    windows = get_holiday_windows(lookahead_days=365, min_trip_days=3)
-    print_holiday_windows(windows, top_n=20)
+    windows = get_holiday_windows(lookahead_days=365)
+    print_holiday_windows(windows, top_n=25)
